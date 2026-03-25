@@ -69,7 +69,7 @@ export function terminateOcr(): void {
  * Otsu's threshold: find the optimal threshold to split a grayscale
  * histogram into foreground / background with minimal intra-class variance.
  */
-function otsuThreshold(data: Uint8ClampedArray, pixelCount: number): number {
+export function otsuThreshold(data: Uint8ClampedArray, pixelCount: number): number {
   // Build grayscale histogram (pixel data is already R=G=B after grayscale pass)
   const histogram = new Int32Array(256)
   for (let i = 0; i < pixelCount; i++) {
@@ -144,40 +144,18 @@ function preprocessFrame(
 
 const SINGLE_WORD_RE = /^(coconut|copra)$/i
 
+/** Minimal word shape needed by tagCoconutWords (subset of Tesseract.Word). */
+export interface WordBox {
+  text: string
+  bbox: { x0: number; y0: number; x1: number; y1: number }
+}
+
 /**
- * Run OCR on a video frame and return bounding boxes for ALL detected words.
- * Each hit is tagged `isCoconut` for coconut-related keywords.
- * Returns null if worker not ready.
+ * Pure function: tag words with isCoconut and merge "cocos nucifera" pairs.
+ * Operates on any array of WordBox objects — no Tesseract dependency.
  */
-export async function recognizeWords(
-  video: HTMLVideoElement,
-): Promise<OcrHit[] | null> {
-  if (!worker || readyState !== 'ready') return null
-
-  const frame = preprocessFrame(video)
-  if (!frame) return null
-
-  let result: Tesseract.RecognizeResult
-  try {
-    result = await worker.recognize(frame.canvas)
-  } catch {
-    // Worker crashed (tab backgrounded, memory pressure, etc.)
-    terminateOcr()
-    return null
-  }
-
-  // Flatten blocks → paragraphs → lines → words
-  const words: Tesseract.Word[] = []
-  if (result.data.blocks) {
-    for (const block of result.data.blocks) {
-      for (const para of block.paragraphs) {
-        for (const line of para.lines) {
-          words.push(...line.words)
-        }
-      }
-    }
-  }
-  if (words.length === 0) return null
+export function tagCoconutWords(words: WordBox[]): OcrHit[] {
+  if (words.length === 0) return []
 
   const hits: OcrHit[] = []
   const coconutIndices = new Set<number>()
@@ -235,4 +213,70 @@ export async function recognizeWords(
   }
 
   return hits
+}
+
+/** Flatten Tesseract result hierarchy into a flat word array. */
+export function flattenWords(blocks: Tesseract.Block[] | undefined): Tesseract.Word[] {
+  const words: Tesseract.Word[] = []
+  if (!blocks) return words
+  for (const block of blocks) {
+    for (const para of block.paragraphs) {
+      for (const line of para.lines) {
+        words.push(...line.words)
+      }
+    }
+  }
+  return words
+}
+
+/**
+ * Run OCR on a video frame and return bounding boxes for ALL detected words.
+ * Each hit is tagged `isCoconut` for coconut-related keywords.
+ * Returns null if worker not ready.
+ */
+export async function recognizeWords(
+  video: HTMLVideoElement,
+): Promise<OcrHit[] | null> {
+  if (!worker || readyState !== 'ready') return null
+
+  const frame = preprocessFrame(video)
+  if (!frame) return null
+
+  let result: Tesseract.RecognizeResult
+  try {
+    result = await worker.recognize(frame.canvas, {}, { blocks: true })
+  } catch {
+    // Worker crashed (tab backgrounded, memory pressure, etc.)
+    terminateOcr()
+    return null
+  }
+
+  const words = flattenWords(result.data.blocks)
+  if (words.length === 0) return null
+
+  const hits = tagCoconutWords(words)
+  return hits.length > 0 ? hits : null
+}
+
+/**
+ * Run OCR on any Tesseract-compatible source (file path, Buffer, Blob, etc.).
+ * Bypasses video/canvas preprocessing — useful for testing & debugging.
+ * Requires the singleton worker to be initialized via initOcr().
+ */
+export async function recognizeImageSource(
+  source: Tesseract.ImageLike,
+): Promise<{ words: Tesseract.Word[]; hits: OcrHit[] } | null> {
+  if (!worker || readyState !== 'ready') return null
+
+  let result: Tesseract.RecognizeResult
+  try {
+    result = await worker.recognize(source, {}, { blocks: true })
+  } catch {
+    terminateOcr()
+    return null
+  }
+
+  const words = flattenWords(result.data.blocks)
+  const hits = tagCoconutWords(words)
+  return { words, hits }
 }
