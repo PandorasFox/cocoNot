@@ -6,7 +6,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/coconutfree
+  IMAGE_NAME: ${{ github.repository_owner }}/coconot
 
 jobs:
   build-and-push:
