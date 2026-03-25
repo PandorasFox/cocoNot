@@ -371,3 +371,14 @@ Embedded PostgreSQL 15 into the app container so deployment is a single `docker 
 - Product detail page now **bolds and colors red** any coconut-related keywords (`coconut`, `cocos nucifera`, `copra`) in the raw ingredients text
 - Uses regex split/match to wrap matching substrings in `<span className="font-bold text-red-600">` while preserving the original casing
 - Makes it immediately obvious when coconut is present in a wall of ingredient text
+
+## 2026-03-25 — Session 11: Rotated Barcode Detection
+
+### Problem
+Rotated barcodes (90°, 180°, 270°) failed to scan. The ZXing WASM engine inside `barcode-detector` doesn't reliably handle rotated 1D barcodes (EAN/UPC).
+
+### Fix
+Added rotation retry logic to `frontend/src/api/barcode.ts`:
+- New `rotateBitmap(src, degrees)` — uses `OffscreenCanvas` to rotate an `ImageBitmap` by arbitrary degrees (computes bounding box from cos/sin)
+- New `detectWithRotations(bitmap)` — tries detection at 0°, then 45°, then 90° if no barcode found. 1D barcodes are symmetric so 180°/270° are redundant
+- Applied to all three detection paths: `detectBarcode` (file picker), `detectBarcodeFromVideo` (single frame), and `detectBarcodeBurst` (multi-frame burst)

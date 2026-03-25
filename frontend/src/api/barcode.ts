@@ -19,6 +19,45 @@ function getDetector(): BarcodeDetector {
   return detector
 }
 
+/** Rotate an ImageBitmap by the given degrees using OffscreenCanvas. */
+function rotateBitmap(src: ImageBitmap, degrees: number): ImageBitmap {
+  const rad = (degrees * Math.PI) / 180
+  const cos = Math.abs(Math.cos(rad))
+  const sin = Math.abs(Math.sin(rad))
+  const w = Math.ceil(src.width * cos + src.height * sin)
+  const h = Math.ceil(src.width * sin + src.height * cos)
+  const canvas = new OffscreenCanvas(w, h)
+  const ctx = canvas.getContext('2d')!
+  ctx.translate(w / 2, h / 2)
+  ctx.rotate(rad)
+  ctx.drawImage(src, -src.width / 2, -src.height / 2)
+  return canvas.transferToImageBitmap()
+}
+
+/** Try detecting a barcode at 0°, 45°, and 90° rotations. */
+async function detectWithRotations(
+  bitmap: ImageBitmap,
+): Promise<string | null> {
+  const det = getDetector()
+
+  // Try original orientation first
+  const results = await det.detect(bitmap)
+  if (results.length > 0) return results[0].rawValue
+
+  // Try 45° and 90° rotations
+  for (const deg of [45, 90]) {
+    const rotated = rotateBitmap(bitmap, deg)
+    try {
+      const r = await det.detect(rotated)
+      if (r.length > 0) return r[0].rawValue
+    } finally {
+      rotated.close()
+    }
+  }
+
+  return null
+}
+
 /**
  * Detect product barcodes from a captured image file.
  * Returns the raw barcode string (SKU) or null if none found.
@@ -26,9 +65,7 @@ function getDetector(): BarcodeDetector {
 export async function detectBarcode(file: File): Promise<string | null> {
   const bitmap = await createImageBitmap(file)
   try {
-    const results = await getDetector().detect(bitmap)
-    if (results.length === 0) return null
-    return results[0].rawValue
+    return await detectWithRotations(bitmap)
   } finally {
     bitmap.close()
   }
@@ -40,9 +77,7 @@ export async function detectBarcodeFromVideo(
 ): Promise<string | null> {
   const bitmap = await createImageBitmap(video)
   try {
-    const results = await getDetector().detect(bitmap)
-    if (results.length === 0) return null
-    return results[0].rawValue
+    return await detectWithRotations(bitmap)
   } finally {
     bitmap.close()
   }
@@ -68,13 +103,11 @@ export async function detectBarcodeBurst(
     if (i < frames - 1) await sleep(intervalMs)
   }
 
-  // Decode all frames in parallel
-  const det = getDetector()
+  // Decode all frames in parallel, trying rotations on each
   const results = await Promise.all(
     bitmaps.map(async (bmp) => {
       try {
-        const found = await det.detect(bmp)
-        return found.length > 0 ? found[0].rawValue : null
+        return await detectWithRotations(bmp)
       } finally {
         bmp.close()
       }
