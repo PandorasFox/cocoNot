@@ -75,7 +75,6 @@ export function drawUnifiedHitboxes(
 ) {
   ctx.clearRect(0, 0, dw, dh)
 
-  const lineWidth = 3
   const chipFontSize = 11
   const chipPadX = 4
   const chipPadY = 2
@@ -86,6 +85,14 @@ export function drawUnifiedHitboxes(
     const isOcr = key.startsWith('ocr:')
     const color = isOcr ? HITBOX_COLORS.coconut_ocr : (HITBOX_COLORS[status] ?? '#ef4444')
 
+    // OCR hitboxes: thicker border, grown outward so it doesn't cover text
+    const lineWidth = isOcr ? 5 : 3
+    const outset = isOcr ? lineWidth / 2 : 0
+    const rx = x - outset
+    const ry = y - outset
+    const rw = w + outset * 2
+    const rh = h + outset * 2
+
     // Draw rounded rect border
     ctx.strokeStyle = color
     ctx.lineWidth = lineWidth
@@ -93,15 +100,15 @@ export function drawUnifiedHitboxes(
 
     const r = 6
     ctx.beginPath()
-    ctx.moveTo(x + r, y)
-    ctx.lineTo(x + w - r, y)
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-    ctx.lineTo(x + w, y + h - r)
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-    ctx.lineTo(x + r, y + h)
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-    ctx.lineTo(x, y + r)
-    ctx.quadraticCurveTo(x, y, x + r, y)
+    ctx.moveTo(rx + r, ry)
+    ctx.lineTo(rx + rw - r, ry)
+    ctx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + r)
+    ctx.lineTo(rx + rw, ry + rh - r)
+    ctx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - r, ry + rh)
+    ctx.lineTo(rx + r, ry + rh)
+    ctx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - r)
+    ctx.lineTo(rx, ry + r)
+    ctx.quadraticCurveTo(rx, ry, rx + r, ry)
     ctx.closePath()
     ctx.stroke()
 

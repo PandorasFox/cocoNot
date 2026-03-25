@@ -13,9 +13,21 @@ export interface OcrHit {
 
 export type OcrReadyState = 'loading' | 'ready' | 'error'
 
-// ── Singleton state ────────────────────────────────────────────
+export interface Tile {
+  canvas: OffscreenCanvas
+  offsetX: number
+  offsetY: number
+}
 
-let worker: Tesseract.Worker | null = null
+// ── Constants ─────────────────────────────────────────────────
+
+export const POOL_SIZE = 4
+export const TILE_SIZE = 1600
+export const TILE_OVERLAP = 200
+
+// ── Worker pool state ─────────────────────────────────────────
+
+let workers: Tesseract.Worker[] = []
 let readyState: OcrReadyState = 'loading'
 const listeners = new Set<(s: OcrReadyState) => void>()
 
@@ -37,28 +49,29 @@ export function onOcrReadyChange(fn: (s: OcrReadyState) => void): () => void {
 
 let initPromise: Promise<void> | null = null
 
-/** Eagerly initialize the Tesseract worker. Safe to call multiple times. */
+/** Eagerly initialize the Tesseract worker pool. Safe to call multiple times. */
 export function initOcr(): void {
   if (initPromise) return
   initPromise = (async () => {
     try {
       setReadyState('loading')
-      worker = await Tesseract.createWorker('eng')
+      workers = await Promise.all(
+        Array.from({ length: POOL_SIZE }, () => Tesseract.createWorker('eng')),
+      )
       setReadyState('ready')
     } catch {
       setReadyState('error')
-      worker = null
+      for (const w of workers) w.terminate().catch(() => {})
+      workers = []
       initPromise = null
     }
   })()
 }
 
-/** Tear down the worker (crash recovery). Next initOcr() recreates it. */
+/** Tear down all workers (crash recovery). Next initOcr() recreates the pool. */
 export function terminateOcr(): void {
-  if (worker) {
-    worker.terminate().catch(() => {})
-    worker = null
-  }
+  for (const w of workers) w.terminate().catch(() => {})
+  workers = []
   initPromise = null
   setReadyState('loading')
 }
@@ -70,7 +83,6 @@ export function terminateOcr(): void {
  * histogram into foreground / background with minimal intra-class variance.
  */
 export function otsuThreshold(data: Uint8ClampedArray, pixelCount: number): number {
-  // Build grayscale histogram (pixel data is already R=G=B after grayscale pass)
   const histogram = new Int32Array(256)
   for (let i = 0; i < pixelCount; i++) {
     histogram[data[i * 4]]++
@@ -105,18 +117,11 @@ export function otsuThreshold(data: Uint8ClampedArray, pixelCount: number): numb
   return threshold
 }
 
-/** Capture video frame, convert to binary B/W via grayscale + Otsu. */
-function preprocessFrame(
-  video: HTMLVideoElement,
-): { canvas: OffscreenCanvas; width: number; height: number } | null {
-  const w = video.videoWidth
-  const h = video.videoHeight
-  if (!w || !h) return null
-
-  const canvas = new OffscreenCanvas(w, h)
+/** Apply grayscale + Otsu binary threshold to an OffscreenCanvas in place. */
+export function preprocessCanvas(canvas: OffscreenCanvas): void {
+  const w = canvas.width
+  const h = canvas.height
   const ctx = canvas.getContext('2d')!
-  ctx.drawImage(video, 0, 0, w, h)
-
   const imageData = ctx.getImageData(0, 0, w, h)
   const { data } = imageData
   const pixelCount = w * h
@@ -128,7 +133,7 @@ function preprocessFrame(
     data[off] = data[off + 1] = data[off + 2] = gray
   }
 
-  // Otsu threshold → binary
+  // Otsu threshold -> binary
   const thresh = otsuThreshold(data, pixelCount)
   for (let i = 0; i < pixelCount; i++) {
     const off = i * 4
@@ -137,7 +142,87 @@ function preprocessFrame(
   }
 
   ctx.putImageData(imageData, 0, 0)
-  return { canvas, width: w, height: h }
+}
+
+// ── Tiling ────────────────────────────────────────────────────
+
+/** Compute tile positions along a single axis. */
+function tilePositions(total: number, tileSize: number, overlap: number): number[] {
+  if (total <= tileSize) return [0]
+  const stride = tileSize - overlap
+  const positions: number[] = []
+  for (let p = 0; p + tileSize <= total; p += stride) {
+    positions.push(p)
+  }
+  // Flush: ensure the last tile covers the edge
+  if (positions.length === 0 || positions[positions.length - 1] + tileSize < total) {
+    positions.push(Math.max(0, total - tileSize))
+  }
+  return positions
+}
+
+/**
+ * Split a source canvas into overlapping tiles for parallel OCR.
+ * Each tile is preprocessed (grayscale + Otsu) individually.
+ */
+export function createTiles(
+  source: OffscreenCanvas,
+  width: number,
+  height: number,
+  tileSize = TILE_SIZE,
+  overlap = TILE_OVERLAP,
+): Tile[] {
+  // Small enough for a single tile — preprocess and return as-is
+  if (width <= tileSize && height <= tileSize) {
+    preprocessCanvas(source)
+    return [{ canvas: source, offsetX: 0, offsetY: 0 }]
+  }
+
+  const xs = tilePositions(width, tileSize, overlap)
+  const ys = tilePositions(height, tileSize, overlap)
+
+  const tiles: Tile[] = []
+  for (const ty of ys) {
+    for (const tx of xs) {
+      const tw = Math.min(tileSize, width - tx)
+      const th = Math.min(tileSize, height - ty)
+      const tile = new OffscreenCanvas(tw, th)
+      tile.getContext('2d')!.drawImage(source, tx, ty, tw, th, 0, 0, tw, th)
+      preprocessCanvas(tile)
+      tiles.push({ canvas: tile, offsetX: tx, offsetY: ty })
+    }
+  }
+  return tiles
+}
+
+// ── Deduplication ─────────────────────────────────────────────
+
+/** Deduplicate coconut hits from overlapping tiles using IoU. */
+export function deduplicateHits(hits: OcrHit[]): OcrHit[] {
+  const result: OcrHit[] = []
+  for (const hit of hits) {
+    if (!hit.isCoconut) {
+      result.push(hit)
+      continue
+    }
+    let isDupe = false
+    for (const existing of result) {
+      if (!existing.isCoconut) continue
+      const x1 = Math.max(hit.x, existing.x)
+      const y1 = Math.max(hit.y, existing.y)
+      const x2 = Math.min(hit.x + hit.w, existing.x + existing.w)
+      const y2 = Math.min(hit.y + hit.h, existing.y + existing.h)
+      const intersection = Math.max(0, x2 - x1) * Math.max(0, y2 - y1)
+      const area = hit.w * hit.h
+      // If >30% of this hit overlaps an existing one, skip it
+      if (area > 0 && intersection / area > 0.3) {
+        isDupe = true
+        break
+      }
+    }
+    if (!isDupe) result.push(hit)
+  }
+  return result
 }
 
 // ── Coconut keyword matching ───────────────────────────────────
@@ -229,48 +314,85 @@ export function flattenWords(blocks: Tesseract.Block[] | null | undefined): Tess
   return words
 }
 
+// ── Recognition ───────────────────────────────────────────────
+
 /**
- * Run OCR on a video frame and return bounding boxes for ALL detected words.
- * Each hit is tagged `isCoconut` for coconut-related keywords.
- * Returns null if worker not ready.
+ * Run tiled parallel OCR on a video frame at native resolution.
+ * Splits the frame into overlapping tiles, OCRs each on a separate worker,
+ * then coalesces and deduplicates the results.
+ * Returns null if workers not ready.
  */
 export async function recognizeWords(
   video: HTMLVideoElement,
 ): Promise<OcrHit[] | null> {
-  if (!worker || readyState !== 'ready') return null
+  if (workers.length === 0 || readyState !== 'ready') return null
 
-  const frame = preprocessFrame(video)
-  if (!frame) return null
+  const w = video.videoWidth
+  const h = video.videoHeight
+  if (!w || !h) return null
 
-  let result: Tesseract.RecognizeResult
-  try {
-    result = await worker.recognize(frame.canvas, {}, { blocks: true })
-  } catch {
-    // Worker crashed (tab backgrounded, memory pressure, etc.)
+  // Capture full-resolution frame
+  const frame = new OffscreenCanvas(w, h)
+  frame.getContext('2d')!.drawImage(video, 0, 0, w, h)
+
+  // Split into preprocessed tiles
+  const tiles = createTiles(frame, w, h)
+
+  // Work-stealing: each worker grabs the next available tile
+  let nextIdx = 0
+  const tileResults: OcrHit[][] = new Array(tiles.length)
+  let crashCount = 0
+
+  async function work(worker: Tesseract.Worker) {
+    while (true) {
+      const idx = nextIdx++
+      if (idx >= tiles.length) return
+      try {
+        const result = await worker.recognize(tiles[idx].canvas, {}, { blocks: true })
+        const words = flattenWords(result.data.blocks)
+        const hits = tagCoconutWords(words)
+        // Map tile-local coordinates to frame-global
+        const tile = tiles[idx]
+        tileResults[idx] = hits.map(hit => ({
+          ...hit,
+          x: hit.x + tile.offsetX,
+          y: hit.y + tile.offsetY,
+        }))
+      } catch {
+        tileResults[idx] = []
+        crashCount++
+      }
+    }
+  }
+
+  await Promise.all(workers.map(w => work(w)))
+
+  // If all workers crashed, tear down and recreate
+  if (crashCount >= tiles.length) {
     terminateOcr()
     return null
   }
 
-  const words = flattenWords(result.data.blocks)
-  if (words.length === 0) return null
+  const allHits = tileResults.flat()
+  if (allHits.length === 0) return null
 
-  const hits = tagCoconutWords(words)
-  return hits.length > 0 ? hits : null
+  const deduplicated = deduplicateHits(allHits)
+  return deduplicated.length > 0 ? deduplicated : null
 }
 
 /**
  * Run OCR on any Tesseract-compatible source (file path, Buffer, Blob, etc.).
  * Bypasses video/canvas preprocessing — useful for testing & debugging.
- * Requires the singleton worker to be initialized via initOcr().
+ * Requires the worker pool to be initialized via initOcr().
  */
 export async function recognizeImageSource(
   source: Tesseract.ImageLike,
 ): Promise<{ words: Tesseract.Word[]; hits: OcrHit[] } | null> {
-  if (!worker || readyState !== 'ready') return null
+  if (workers.length === 0 || readyState !== 'ready') return null
 
   let result: Tesseract.RecognizeResult
   try {
-    result = await worker.recognize(source, {}, { blocks: true })
+    result = await workers[0].recognize(source, {}, { blocks: true })
   } catch {
     terminateOcr()
     return null

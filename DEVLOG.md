@@ -676,3 +676,35 @@ Replaced the sequential upsert loop with a chunked worker pool + `pgx.Batch` pip
 
 ### Files changed
 - `backend/internal/ingest/off.go` — new `prepareProducts()`, `processChunk()`, chunked `upsertProducts()` with errgroup worker pool
+
+## 2026-03-25 — Session 20: Tiled Parallel OCR + Full-Res Camera
+
+### Problem
+Ingredient text OCR missed thin text (e.g. "coconut oil" on small-print labels). Root cause: `getUserMedia` constrained the camera to 1920x1080, downscaling the phone's native resolution (typically 4032x3024 on Pixel cameras). At 1080p, thin strokes in small ingredient text were being destroyed — the same image at native resolution detected "coconut" fine.
+
+### Solution: Tiled Parallel OCR
+Instead of sending one full frame to a single Tesseract worker, the new pipeline:
+
+1. **Requests max camera resolution** — `getUserMedia` now asks for `ideal: 4032x3024` instead of `1920x1080`
+2. **Worker pool** — creates 4 Tesseract workers instead of 1 (phones have many cores)
+3. **Tiling** — splits the full-res frame into overlapping 1600×1600px tiles (200px overlap) so no word is split at a tile boundary
+4. **Per-tile preprocessing** — grayscale + Otsu threshold applied per tile (smaller pixel buffers, distributed work)
+5. **Parallel OCR** — tiles are distributed across the 4 workers via work-stealing (each worker grabs the next available tile)
+6. **Coordinate mapping** — tile-local bounding boxes are adjusted to frame-global coordinates
+7. **Deduplication** — overlapping coconut hits from adjacent tiles are merged using IoU overlap detection (>30% overlap = duplicate)
+
+**Example for a 4032x3024 frame:**
+- 3×2 = 6 tiles, each ~1600×1600
+- 4 workers process first 4 tiles in parallel, then remaining 2
+- Result: ~2 rounds instead of 1 massive OCR call
+
+### OCR Hitbox Border Polish
+- OCR hitbox border increased from 3px to 5px
+- Border now grows **outward** (rect expanded by lineWidth/2) so it doesn't cover the detected text
+- Makes ingredient text matches much more visible on phone screens
+
+### Files Changed
+- `frontend/src/api/ocr.ts` — worker pool, tiling, parallel recognition, deduplication
+- `frontend/src/components/BarcodeScanner.tsx` — camera resolution 1920×1080 → 4032×3024
+- `frontend/src/components/hitbox.ts` — thicker OCR border, outward growth
+- `frontend/src/api/__tests__/ocr.test.ts` — added deduplicateHits unit tests
