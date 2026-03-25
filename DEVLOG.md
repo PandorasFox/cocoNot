@@ -299,3 +299,35 @@ Barcode scanning from the phone camera, entirely client-side:
   - Stats breakdown
 - Check Reclassified page shows product names
 - Verify images render on product cards
+
+## 2026-03-25 — Session 7 (cont): Barcode Scanner → Live Viewfinder
+
+### Upgrade: File Picker → Camera Viewfinder
+Replaced the `<input type="file" capture>` approach with a live camera viewfinder using `getUserMedia`.
+
+**`barcode.ts` additions:**
+- `detectBarcodeFromVideo(video)` — grabs a single frame from a `<video>` element, runs BarcodeDetector
+- `detectBarcodeBurst(video, frames=5, intervalMs=60)` — captures 5 frames over ~300ms, decodes all in parallel, returns the most common result (majority vote). Handles motion blur, poor focus, exposure variation.
+
+**`BarcodeScanner.tsx` rewrite:**
+- Sticky blue footer button (unchanged) now opens a fullscreen viewfinder overlay
+- `getUserMedia({ video: { facingMode: "environment", width: { ideal: 1920 }, height: { ideal: 1080 } } })` for rear camera at high resolution
+- `<video autoPlay playsInline muted>` — works on iOS Safari
+- Tap anywhere on the viewfinder → multi-frame burst scan → navigate on success
+- Error toasts stay in viewfinder so user can retry without re-opening the camera
+- Close button (X) in top-right corner to dismiss
+- Falls back to file picker if getUserMedia fails or is denied
+- Properly cleans up camera stream on close, navigation, and unmount
+
+### State machine
+```
+idle → viewfinder (getUserMedia success) → processing (tap) → idle (navigate)
+                                         → error (stay in viewfinder, retry)
+idle → file-fallback (getUserMedia failure)
+```
+
+### Future: AR passive scanning
+This viewfinder architecture is designed to support future passive scanning — continuously detect barcodes every N frames and draw colored overlays on the video. Will need:
+- localStorage cache of SKU → contains_coconut for zero-latency lookups
+- Canvas overlay on top of video for drawing bounding boxes
+- requestAnimationFrame loop for continuous detection
