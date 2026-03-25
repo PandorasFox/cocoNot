@@ -10,6 +10,7 @@ export interface CachedSKU {
 const DB_NAME = 'coconot'
 const STORE_NAME = 'skus'
 const DB_VERSION = 1
+const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 1 week
 
 let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -48,9 +49,15 @@ function idbGet<T>(store: IDBObjectStore, key: string): Promise<T | undefined> {
   })
 }
 
+function isExpired(entry: CachedSKU): boolean {
+  return entry.cachedAt + CACHE_TTL_MS < Date.now()
+}
+
 export async function getStatus(sku: string): Promise<CachedSKU | undefined> {
   const { store } = await tx('readonly')
-  return idbGet<CachedSKU>(store, sku)
+  const entry = await idbGet<CachedSKU>(store, sku)
+  if (entry && isExpired(entry)) return undefined
+  return entry
 }
 
 export async function getStatuses(
@@ -66,7 +73,7 @@ export async function getStatuses(
   )
   const map = new Map<string, CachedSKU>()
   for (const [sku, entry] of entries) {
-    if (entry) map.set(sku, entry)
+    if (entry && !isExpired(entry)) map.set(sku, entry)
   }
   return map
 }
@@ -136,6 +143,23 @@ export async function putSKULookupResults(
         cachedAt: now,
       } satisfies CachedSKU)
     }
+  }
+  await done
+}
+
+export async function putDump(
+  products: { sku: string; name: string; contains_coconut: boolean | null }[],
+): Promise<void> {
+  if (products.length === 0) return
+  const { store, done } = await tx('readwrite')
+  const now = Date.now()
+  for (const p of products) {
+    store.put({
+      sku: p.sku,
+      status: productToStatus(p.contains_coconut),
+      name: p.name,
+      cachedAt: now,
+    } satisfies CachedSKU)
   }
   await done
 }

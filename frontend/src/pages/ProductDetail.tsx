@@ -130,23 +130,6 @@ export default function ProductDetail() {
         )}
       </div>
 
-      {/* Status history */}
-      {product.history.length > 0 && (
-        <div className="rounded-lg border border-gray-200 bg-white p-4">
-          <h2 className="font-semibold text-gray-900">Status History</h2>
-          <div className="mt-3 flex flex-col gap-2">
-            {product.history.map((h) => (
-              <div key={h.id} className="flex items-center gap-2 text-sm">
-                <span className="text-gray-400">
-                  {new Date(h.changed_at).toLocaleDateString()}
-                </span>
-                <span className="text-gray-600">{h.reason}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
       {/* OFF link */}
       <div className="rounded-lg border border-gray-200 bg-white p-4 text-center">
         <a

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -93,29 +92,17 @@ func (h *Handler) GetProductByBarcode(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, product)
 }
 
-func (h *Handler) GetReclassified(w http.ResponseWriter, r *http.Request) {
-	days := 30
-	if v := r.URL.Query().Get("days"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 365 {
-			days = n
-		}
-	}
-
-	limit := 50
-	if v := r.URL.Query().Get("limit"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
-			limit = n
-		}
-	}
-
-	since := time.Now().AddDate(0, 0, -days)
-	changes, err := h.queries.GetReclassified(r.Context(), since, limit)
+func (h *Handler) SKUDump(w http.ResponseWriter, r *http.Request) {
+	entries, err := h.queries.DumpSKUs(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	writeJSON(w, map[string]any{"changes": changes})
+	writeJSON(w, map[string]any{
+		"products": entries,
+		"total":    len(entries),
+	})
 }
 
 func (h *Handler) CreateFlag(w http.ResponseWriter, r *http.Request) {

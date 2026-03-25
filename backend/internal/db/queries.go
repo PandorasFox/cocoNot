@@ -110,23 +110,6 @@ func (q *Queries) GetProduct(ctx context.Context, id uuid.UUID) (*models.Product
 		return nil, fmt.Errorf("scanning flags: %w", err)
 	}
 
-	// History
-	histRows, err := q.pool.Query(ctx, `
-		SELECT sc.id, sc.product_id, sc.old_contains_coconut, sc.new_contains_coconut, sc.reason, sc.changed_at,
-			p.name AS product_name, p.brand AS product_brand
-		FROM status_changelog sc
-		JOIN products p ON p.id = sc.product_id
-		WHERE sc.product_id = $1 ORDER BY sc.changed_at DESC
-	`, id)
-	if err != nil {
-		return nil, fmt.Errorf("getting history: %w", err)
-	}
-	defer histRows.Close()
-	detail.History, err = pgx.CollectRows(histRows, pgx.RowToStructByName[models.StatusChange])
-	if err != nil {
-		return nil, fmt.Errorf("scanning history: %w", err)
-	}
-
 	return detail, nil
 }
 
@@ -143,24 +126,6 @@ func (q *Queries) GetProductByBarcode(ctx context.Context, sku string) (*models.
 	}
 
 	return &p, nil
-}
-
-func (q *Queries) GetReclassified(ctx context.Context, since time.Time, limit int) ([]models.StatusChange, error) {
-	rows, err := q.pool.Query(ctx, `
-		SELECT sc.id, sc.product_id, sc.old_contains_coconut, sc.new_contains_coconut, sc.reason, sc.changed_at,
-			p.name AS product_name, p.brand AS product_brand
-		FROM status_changelog sc
-		JOIN products p ON p.id = sc.product_id
-		WHERE sc.changed_at >= $1
-		ORDER BY sc.changed_at DESC
-		LIMIT $2
-	`, since, limit)
-	if err != nil {
-		return nil, fmt.Errorf("getting reclassified: %w", err)
-	}
-	defer rows.Close()
-
-	return pgx.CollectRows(rows, pgx.RowToStructByName[models.StatusChange])
 }
 
 func (q *Queries) CreateFlag(ctx context.Context, productID uuid.UUID, flagType, notes string) (*models.UserFlag, error) {
@@ -240,6 +205,26 @@ func (q *Queries) LookupSKUs(ctx context.Context, skus []string) (map[string]mod
 		results[sku] = r
 	}
 	return results, rows.Err()
+}
+
+func (q *Queries) DumpSKUs(ctx context.Context) ([]models.SKUDumpEntry, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT sku, name, contains_coconut FROM products ORDER BY sku
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("dumping SKUs: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []models.SKUDumpEntry
+	for rows.Next() {
+		var e models.SKUDumpEntry
+		if err := rows.Scan(&e.SKU, &e.Name, &e.ContainsCoconut); err != nil {
+			return nil, fmt.Errorf("scanning SKU dump: %w", err)
+		}
+		entries = append(entries, e)
+	}
+	return entries, rows.Err()
 }
 
 func (q *Queries) FuzzySearch(ctx context.Context, query string, limit int) ([]models.Product, error) {

@@ -22,20 +22,8 @@ export interface IngredientSource {
   created_at: string
 }
 
-export interface StatusChange {
-  id: string
-  product_id: string
-  old_contains_coconut: boolean | null
-  new_contains_coconut: boolean | null
-  reason: string
-  changed_at: string
-  product_name: string
-  product_brand: string
-}
-
 export interface ProductDetail extends Product {
   sources: IngredientSource[]
-  history: StatusChange[]
 }
 
 export interface ProductListResponse {
@@ -77,8 +65,14 @@ export function getProductByBarcode(sku: string) {
   return fetchJSON<Product>(`/products/barcode/${encodeURIComponent(sku)}`)
 }
 
-export function getReclassified(days = 30) {
-  return fetchJSON<{ changes: StatusChange[] }>(`/products/reclassified?days=${days}`)
+export interface SKUDumpEntry {
+  sku: string
+  name: string
+  contains_coconut: boolean | null
+}
+
+export function skuDump() {
+  return fetchJSON<{ products: SKUDumpEntry[]; total: number }>('/products/sku-dump')
 }
 
 export function fuzzySearch(q: string, limit = 20) {

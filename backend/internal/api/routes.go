@@ -17,7 +17,7 @@ func NewRouter(queries *db.Queries) *chi.Mux {
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/products", h.ListProducts)
-		r.Get("/products/reclassified", h.GetReclassified)
+		r.Get("/products/sku-dump", h.SKUDump)
 		r.Get("/products/barcode/{sku}", h.GetProductByBarcode)
 		r.Get("/products/{id}", h.GetProduct)
 		r.Post("/products/{id}/flag", h.CreateFlag)

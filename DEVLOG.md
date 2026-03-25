@@ -419,3 +419,41 @@ Three interconnected features for real-time barcode status overlay in the viewfi
 - `Home.tsx`: `putProducts()` after search results load
 - `ProductDetail.tsx`: `putProduct()` after product detail loads
 - `BarcodeScanner.tsx`: `putProduct()`/`putNotFound()` after barcode lookup, batch `putSKULookupResults()` from viewfinder detection loop
+
+## 2026-03-25 — Session 13: Hitbox Polish, Cache TTL, Preload Button, Remove Watchlist
+
+### Hitbox Stabilization + Labels (`BarcodeScanner.tsx`)
+- **Persistent hitbox map** in a ref (`Map<string, HitboxEntry>`) — detections merge into the map instead of redrawing from scratch each tick
+- **2-second retention** — barcodes that disappear for <2s keep their hitbox (prevents flicker from momentary detection misses)
+- **Detection interval 300ms → 1000ms** — reduces battery drain and jitter
+- **16px padding** on all sides of bounding boxes — easier to see
+- **Text label chips** drawn above each hitbox:
+  - Background color matches hitbox border (red/yellow/blue)
+  - Shows product name (truncated to 25 chars) or status fallback ("COCONUT"/"CLEAN"/"UNKNOWN")
+  - Text color via WCAG relative luminance: white on dark backgrounds, black on light (yellow)
+  - Small rounded chip with 4px horizontal / 2px vertical padding
+
+### Cache TTL — 1 Week (`cache.ts`)
+- `CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000`
+- `getStatus()` and `getStatuses()` treat entries where `cachedAt + TTL < Date.now()` as cache misses
+- Expired entries left in IndexedDB (lazy overwrite on next lookup)
+
+### SKU Dump Endpoint — `GET /api/products/sku-dump`
+- Returns all products in compact format: `{ products: [{ sku, name, contains_coconut }], total }`
+- Backend: `DumpSKUs()` query, `SKUDump` handler, new route
+- Frontend: `skuDump()` client function, `putDump()` bulk cache write
+
+### "Cache SKUs" Button (`Nav.tsx`)
+- Replaced "Watch List" nav link with "Cache SKUs" button
+- On click: fetches full SKU dump → writes to IndexedDB → shows "Cached N products" confirmation
+- Spinner while loading, auto-resets after 3 seconds
+
+### Watchlist Removal
+- Deleted `Reclassified.tsx` page
+- Removed `/reclassified` route from `App.tsx`
+- Removed `GetReclassified` handler, route, and query from backend
+- Removed `StatusChange` struct from `models.go`
+- Removed `History` field from `ProductDetail` struct and the history query in `GetProduct()`
+- Removed `StatusChange` interface, `getReclassified()`, and `history` field from frontend client
+- Removed "Status History" section from `ProductDetail.tsx`
+- Kept: `status_changelog` table + write path (audit trail)

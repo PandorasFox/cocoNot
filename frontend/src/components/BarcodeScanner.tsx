@@ -17,6 +17,35 @@ const HITBOX_COLORS: Record<CachedSKU['status'], string> = {
   not_found: '#3b82f6', // blue
 }
 
+// Status fallback labels when no product name is cached
+const STATUS_LABELS: Record<CachedSKU['status'], string> = {
+  coconut: 'COCONUT',
+  clean: 'CLEAN',
+  not_found: 'UNKNOWN',
+}
+
+// WCAG relative luminance for a hex color
+function relativeLuminance(hex: string): number {
+  const r = parseInt(hex.slice(1, 3), 16) / 255
+  const g = parseInt(hex.slice(3, 5), 16) / 255
+  const b = parseInt(hex.slice(5, 7), 16) / 255
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b
+}
+
+// Persistent hitbox entry
+interface HitboxEntry {
+  x: number
+  y: number
+  w: number
+  h: number
+  status: CachedSKU['status']
+  name?: string
+  lastSeenAt: number
+}
+
+const HITBOX_RETAIN_MS = 2000
+const HITBOX_PADDING = 16
+
 /**
  * Compute the mapping from video natural coordinates to display coordinates.
  * The video uses object-cover, so it scales up and crops to fill the container.
@@ -57,6 +86,7 @@ export default function BarcodeScanner() {
   const streamRef = useRef<MediaStream | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
   const inFlightRef = useRef(new Set<string>())
+  const hitboxMapRef = useRef(new Map<string, HitboxEntry>())
   const [state, setState] = useState<ScanState>({ status: 'idle' })
 
   // Stop the camera stream
@@ -164,6 +194,9 @@ export default function BarcodeScanner() {
   useEffect(() => {
     if (!isViewfinderOpen) return
 
+    // Clear hitbox map when viewfinder opens
+    hitboxMapRef.current.clear()
+
     const id = setInterval(async () => {
       const video = videoRef.current
       const canvas = canvasRef.current
@@ -180,58 +213,83 @@ export default function BarcodeScanner() {
       const ctx = canvas.getContext('2d')
       if (!ctx) return
 
-      ctx.clearRect(0, 0, dw, dh)
+      const now = Date.now()
+      const transform = videoCoverTransform(video)
 
       // Detect barcodes with bounding boxes
       let detections: { rawValue: string; boundingBox: DOMRectReadOnly }[]
       try {
         detections = await detectBarcodesWithBounds(video)
       } catch {
-        return
+        detections = []
       }
 
-      if (detections.length === 0) return
+      if (detections.length > 0 && transform) {
+        const { scale, offsetX, offsetY } = transform
 
-      const transform = videoCoverTransform(video)
-      if (!transform) return
+        // Look up all detected SKUs in cache
+        const skus = detections.map((d) => d.rawValue)
+        const cached = await getStatuses(skus)
 
-      // Look up all detected SKUs in cache
-      const skus = detections.map((d) => d.rawValue)
-      const cached = await getStatuses(skus)
+        // Fire batch lookup for cache misses
+        const misses = skus.filter(
+          (sku) => !cached.has(sku) && !inFlightRef.current.has(sku),
+        )
+        if (misses.length > 0) {
+          for (const sku of misses) inFlightRef.current.add(sku)
+          skuLookup(misses)
+            .then((res) => putSKULookupResults(res.results, misses))
+            .catch(() => {})
+            .finally(() => {
+              for (const sku of misses) inFlightRef.current.delete(sku)
+            })
+        }
 
-      // Fire batch lookup for cache misses
-      const misses = skus.filter(
-        (sku) => !cached.has(sku) && !inFlightRef.current.has(sku),
-      )
-      if (misses.length > 0) {
-        for (const sku of misses) inFlightRef.current.add(sku)
-        skuLookup(misses)
-          .then((res) => putSKULookupResults(res.results, misses))
-          .catch(() => {})
-          .finally(() => {
-            for (const sku of misses) inFlightRef.current.delete(sku)
+        // Merge detections into persistent hitbox map
+        for (const det of detections) {
+          const entry = cached.get(det.rawValue)
+          if (!entry) continue
+
+          const bb = det.boundingBox
+          const x = bb.x * scale + offsetX - HITBOX_PADDING
+          const y = bb.y * scale + offsetY - HITBOX_PADDING
+          const w = bb.width * scale + HITBOX_PADDING * 2
+          const h = bb.height * scale + HITBOX_PADDING * 2
+
+          hitboxMapRef.current.set(det.rawValue, {
+            x, y, w, h,
+            status: entry.status,
+            name: entry.name,
+            lastSeenAt: now,
           })
+        }
       }
 
-      // Draw hitboxes
-      const { scale, offsetX, offsetY } = transform
+      // Evict stale entries
+      for (const [sku, entry] of hitboxMapRef.current) {
+        if (now - entry.lastSeenAt > HITBOX_RETAIN_MS) {
+          hitboxMapRef.current.delete(sku)
+        }
+      }
+
+      // Redraw from the persistent map
+      ctx.clearRect(0, 0, dw, dh)
+
       const lineWidth = 3
+      const chipFontSize = 11
+      const chipPadX = 4
+      const chipPadY = 2
+      const chipRadius = 3
 
-      for (const det of detections) {
-        const entry = cached.get(det.rawValue)
-        if (!entry) continue // no cached status yet — skip drawing
+      for (const [, entry] of hitboxMapRef.current) {
+        const { x, y, w, h, status, name } = entry
+        const color = HITBOX_COLORS[status]
 
-        const bb = det.boundingBox
-        const x = bb.x * scale + offsetX
-        const y = bb.y * scale + offsetY
-        const w = bb.width * scale
-        const h = bb.height * scale
-
-        ctx.strokeStyle = HITBOX_COLORS[entry.status]
+        // Draw rounded rect border
+        ctx.strokeStyle = color
         ctx.lineWidth = lineWidth
         ctx.lineJoin = 'round'
 
-        // Rounded rect
         const r = 6
         ctx.beginPath()
         ctx.moveTo(x + r, y)
@@ -245,8 +303,41 @@ export default function BarcodeScanner() {
         ctx.quadraticCurveTo(x, y, x + r, y)
         ctx.closePath()
         ctx.stroke()
+
+        // Draw text label chip above the bounding box
+        const label = name
+          ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
+          : STATUS_LABELS[status]
+
+        ctx.font = `bold ${chipFontSize}px sans-serif`
+        const textWidth = ctx.measureText(label).width
+        const chipW = textWidth + chipPadX * 2
+        const chipH = chipFontSize + chipPadY * 2
+        const chipX = x
+        const chipY = y - chipH - 2
+
+        // Chip background
+        ctx.fillStyle = color
+        ctx.beginPath()
+        ctx.moveTo(chipX + chipRadius, chipY)
+        ctx.lineTo(chipX + chipW - chipRadius, chipY)
+        ctx.quadraticCurveTo(chipX + chipW, chipY, chipX + chipW, chipY + chipRadius)
+        ctx.lineTo(chipX + chipW, chipY + chipH - chipRadius)
+        ctx.quadraticCurveTo(chipX + chipW, chipY + chipH, chipX + chipW - chipRadius, chipY + chipH)
+        ctx.lineTo(chipX + chipRadius, chipY + chipH)
+        ctx.quadraticCurveTo(chipX, chipY + chipH, chipX, chipY + chipH - chipRadius)
+        ctx.lineTo(chipX, chipY + chipRadius)
+        ctx.quadraticCurveTo(chipX, chipY, chipX + chipRadius, chipY)
+        ctx.closePath()
+        ctx.fill()
+
+        // Chip text — WCAG contrast
+        const lum = relativeLuminance(color)
+        ctx.fillStyle = lum > 0.5 ? '#000000' : '#ffffff'
+        ctx.textBaseline = 'top'
+        ctx.fillText(label, chipX + chipPadX, chipY + chipPadY)
       }
-    }, 300)
+    }, 1000)
 
     return () => clearInterval(id)
   }, [isViewfinderOpen])

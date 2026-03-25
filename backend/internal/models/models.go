@@ -40,29 +40,24 @@ type UserFlag struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-type StatusChange struct {
-	ID                  uuid.UUID `json:"id"`
-	ProductID           uuid.UUID `json:"product_id"`
-	OldContainsCoconut  *bool     `json:"old_contains_coconut"`
-	NewContainsCoconut  *bool     `json:"new_contains_coconut"`
-	Reason              string    `json:"reason"`
-	ChangedAt           time.Time `json:"changed_at"`
-	ProductName         string    `json:"product_name" db:"product_name"`
-	ProductBrand        string    `json:"product_brand" db:"product_brand"`
-}
-
 // ProductDetail is the full view of a product with all its sources and flags.
 type ProductDetail struct {
 	Product
 	Sources []IngredientSource `json:"sources"`
 	Flags   []UserFlag         `json:"flags"`
-	History []StatusChange     `json:"history"`
 }
 
 // FlagRequest is what the user submits when flagging a product.
 type FlagRequest struct {
 	FlagType string `json:"flag_type"`
 	Notes    string `json:"notes"`
+}
+
+// SKUDumpEntry is a compact product entry for the full SKU dump endpoint.
+type SKUDumpEntry struct {
+	SKU             string `json:"sku"`
+	Name            string `json:"name"`
+	ContainsCoconut *bool  `json:"contains_coconut"`
 }
 
 // SKULookupRequest is the payload for bulk SKU lookups.
