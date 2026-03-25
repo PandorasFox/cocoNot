@@ -1,4 +1,5 @@
 import type { Product } from './client'
+import { extractText } from './parse'
 
 export interface CachedSKU {
   sku: string
@@ -89,7 +90,7 @@ export async function putProduct(product: Product): Promise<void> {
   store.put({
     sku: product.sku,
     status: productToStatus(product.contains_coconut),
-    name: product.name,
+    name: extractText(product.name),
     cachedAt: Date.now(),
   } satisfies CachedSKU)
   await done
@@ -103,7 +104,7 @@ export async function putProducts(products: Product[]): Promise<void> {
     store.put({
       sku: p.sku,
       status: productToStatus(p.contains_coconut),
-      name: p.name,
+      name: extractText(p.name),
       cachedAt: now,
     } satisfies CachedSKU)
   }
@@ -131,7 +132,7 @@ export async function putSKULookupResults(
     store.put({
       sku,
       status: productToStatus(r.contains_coconut),
-      name: r.name,
+      name: extractText(r.name),
       cachedAt: now,
     } satisfies CachedSKU)
   }
@@ -157,7 +158,7 @@ export async function putDump(
     store.put({
       sku: p.sku,
       status: productToStatus(p.contains_coconut),
-      name: p.name,
+      name: extractText(p.name),
       cachedAt: now,
     } satisfies CachedSKU)
   }

@@ -58,19 +58,6 @@ async function detectWithRotations(
   return null
 }
 
-/**
- * Detect product barcodes from a captured image file.
- * Returns the raw barcode string (SKU) or null if none found.
- */
-export async function detectBarcode(file: File): Promise<string | null> {
-  const bitmap = await createImageBitmap(file)
-  try {
-    return await detectWithRotations(bitmap)
-  } finally {
-    bitmap.close()
-  }
-}
-
 /** Detect a barcode from a single video frame. */
 export async function detectBarcodeFromVideo(
   video: HTMLVideoElement,

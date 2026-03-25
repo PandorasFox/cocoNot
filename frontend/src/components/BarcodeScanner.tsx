@@ -1,20 +1,24 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
-import { detectBarcode, detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
+import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound, type CachedSKU } from '../api/cache'
+import { initOcr, recognizeCoconutHits, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
+
+type ViewfinderMode = 'barcode' | 'ocr'
 
 type ScanState =
   | { status: 'idle' }
-  | { status: 'viewfinder' }
-  | { status: 'processing'; source: 'file' | 'viewfinder' }
-  | { status: 'error'; message: string; inViewfinder: boolean }
+  | { status: 'viewfinder'; mode: ViewfinderMode }
+  | { status: 'processing'; source: 'viewfinder'; mode: ViewfinderMode }
+  | { status: 'error'; message: string; inViewfinder: boolean; mode?: ViewfinderMode }
 
 // Colors for hitbox borders
-const HITBOX_COLORS: Record<CachedSKU['status'], string> = {
+const HITBOX_COLORS: Record<CachedSKU['status'] | 'coconut_ocr', string> = {
   coconut: '#ef4444',   // red
   clean: '#eab308',     // yellow
   not_found: '#3b82f6', // blue
+  coconut_ocr: '#ef4444', // red (same as coconut)
 }
 
 // Status fallback labels when no product name is cached
@@ -65,12 +69,10 @@ function videoCoverTransform(video: HTMLVideoElement) {
   let offsetY: number
 
   if (videoAspect > displayAspect) {
-    // Video is wider — cropped horizontally
     scale = dh / vh
     offsetX = (dw - vw * scale) / 2
     offsetY = 0
   } else {
-    // Video is taller — cropped vertically
     scale = dw / vw
     offsetX = 0
     offsetY = (dh - vh * scale) / 2
@@ -79,15 +81,92 @@ function videoCoverTransform(video: HTMLVideoElement) {
   return { scale, offsetX, offsetY }
 }
 
+/** Draw hitboxes from the persistent map onto the canvas. */
+function drawHitboxes(
+  ctx: CanvasRenderingContext2D,
+  dw: number,
+  dh: number,
+  hitboxMap: Map<string, HitboxEntry>,
+) {
+  ctx.clearRect(0, 0, dw, dh)
+
+  const lineWidth = 3
+  const chipFontSize = 11
+  const chipPadX = 4
+  const chipPadY = 2
+  const chipRadius = 3
+
+  for (const [, entry] of hitboxMap) {
+    const { x, y, w, h, status, name } = entry
+    const color = HITBOX_COLORS[status] ?? '#ef4444'
+
+    // Draw rounded rect border
+    ctx.strokeStyle = color
+    ctx.lineWidth = lineWidth
+    ctx.lineJoin = 'round'
+
+    const r = 6
+    ctx.beginPath()
+    ctx.moveTo(x + r, y)
+    ctx.lineTo(x + w - r, y)
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+    ctx.lineTo(x + w, y + h - r)
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+    ctx.lineTo(x + r, y + h)
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+    ctx.lineTo(x, y + r)
+    ctx.quadraticCurveTo(x, y, x + r, y)
+    ctx.closePath()
+    ctx.stroke()
+
+    // Draw text label chip above the bounding box
+    const label = name
+      ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
+      : STATUS_LABELS[status] ?? status.toUpperCase()
+
+    ctx.font = `bold ${chipFontSize}px sans-serif`
+    const textWidth = ctx.measureText(label).width
+    const chipW = textWidth + chipPadX * 2
+    const chipH = chipFontSize + chipPadY * 2
+    const chipX = x
+    const chipY = y - chipH - 2
+
+    // Chip background
+    ctx.fillStyle = color
+    ctx.beginPath()
+    ctx.moveTo(chipX + chipRadius, chipY)
+    ctx.lineTo(chipX + chipW - chipRadius, chipY)
+    ctx.quadraticCurveTo(chipX + chipW, chipY, chipX + chipW, chipY + chipRadius)
+    ctx.lineTo(chipX + chipW, chipY + chipH - chipRadius)
+    ctx.quadraticCurveTo(chipX + chipW, chipY + chipH, chipX + chipW - chipRadius, chipY + chipH)
+    ctx.lineTo(chipX + chipRadius, chipY + chipH)
+    ctx.quadraticCurveTo(chipX, chipY + chipH, chipX, chipY + chipH - chipRadius)
+    ctx.lineTo(chipX, chipY + chipRadius)
+    ctx.quadraticCurveTo(chipX, chipY, chipX + chipRadius, chipY)
+    ctx.closePath()
+    ctx.fill()
+
+    // Chip text — WCAG contrast
+    const lum = relativeLuminance(color)
+    ctx.fillStyle = lum > 0.5 ? '#000000' : '#ffffff'
+    ctx.textBaseline = 'top'
+    ctx.fillText(label, chipX + chipPadX, chipY + chipPadY)
+  }
+}
+
 export default function BarcodeScanner() {
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
   const inFlightRef = useRef(new Set<string>())
   const hitboxMapRef = useRef(new Map<string, HitboxEntry>())
+  const viewfinderModeRef = useRef<ViewfinderMode>('barcode')
   const [state, setState] = useState<ScanState>({ status: 'idle' })
+  const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
+
+  // Subscribe to OCR readiness changes
+  useEffect(() => onOcrReadyChange(setOcrReady), [])
 
   // Stop the camera stream
   const stopStream = useCallback(() => {
@@ -119,48 +198,18 @@ export default function BarcodeScanner() {
     [navigate, stopStream],
   )
 
-  // ── File picker scan (blue button) ──────────────────────────
-
-  const openFilePicker = useCallback(() => {
-    inputRef.current?.click()
-  }, [])
-
-  const handleFile = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0]
-      if (!file) return
-
-      setState({ status: 'processing', source: 'file' })
-      try {
-        const sku = await detectBarcode(file)
-        if (!sku) {
-          setState({
-            status: 'error',
-            message: 'No barcode found. Try again with the barcode centered in frame.',
-            inViewfinder: false,
-          })
-          return
-        }
-        await handleSKU(sku)
-      } catch {
-        setState({
-          status: 'error',
-          message: 'Could not read barcode. Try a clearer photo.',
-          inViewfinder: false,
-        })
-      } finally {
-        if (inputRef.current) inputRef.current.value = ''
-      }
-    },
-    [handleSKU],
-  )
-
-  // ── Live viewfinder (pink button) ───────────────────────────
+  // ── Viewfinder state helpers ─────────────────────────────────
 
   const isViewfinderOpen =
-    state.status === 'viewfinder' ||
+    (state.status === 'viewfinder') ||
     (state.status === 'processing' && state.source === 'viewfinder') ||
     (state.status === 'error' && state.inViewfinder)
+
+  const currentMode =
+    (state.status === 'viewfinder' ? state.mode :
+    state.status === 'processing' ? state.mode :
+    state.status === 'error' && state.mode ? state.mode :
+    viewfinderModeRef.current)
 
   // Attach stream to video element once the viewfinder mounts
   useEffect(() => {
@@ -168,19 +217,14 @@ export default function BarcodeScanner() {
     const stream = streamRef.current
     if (!video || !stream || !isViewfinderOpen) return
 
-    // Firefox mobile needs srcObject set and play() called explicitly.
-    // Setting attributes directly for maximum compatibility.
     video.setAttribute('autoplay', '')
     video.setAttribute('playsinline', '')
     video.srcObject = stream
 
     const startPlayback = () => {
-      video.play().catch(() => {
-        // play() can reject if the user switches away quickly — harmless
-      })
+      video.play().catch(() => {})
     }
 
-    // If the video already has data, play immediately; otherwise wait
     if (video.readyState >= video.HAVE_METADATA) {
       startPlayback()
     } else {
@@ -189,12 +233,11 @@ export default function BarcodeScanner() {
     }
   }, [isViewfinderOpen])
 
-  // ── Continuous detection loop for hitbox overlays ──────────
+  // ── Barcode detection loop ───────────────────────────────────
 
   useEffect(() => {
-    if (!isViewfinderOpen) return
+    if (!isViewfinderOpen || currentMode !== 'barcode') return
 
-    // Clear hitbox map when viewfinder opens
     hitboxMapRef.current.clear()
 
     const id = setInterval(async () => {
@@ -202,7 +245,6 @@ export default function BarcodeScanner() {
       const canvas = canvasRef.current
       if (!video || !canvas || video.readyState < video.HAVE_CURRENT_DATA) return
 
-      // Size canvas to match video display size
       const dw = video.clientWidth
       const dh = video.clientHeight
       if (canvas.width !== dw || canvas.height !== dh) {
@@ -216,7 +258,6 @@ export default function BarcodeScanner() {
       const now = Date.now()
       const transform = videoCoverTransform(video)
 
-      // Detect barcodes with bounding boxes
       let detections: { rawValue: string; boundingBox: DOMRectReadOnly }[]
       try {
         detections = await detectBarcodesWithBounds(video)
@@ -227,11 +268,9 @@ export default function BarcodeScanner() {
       if (detections.length > 0 && transform) {
         const { scale, offsetX, offsetY } = transform
 
-        // Look up all detected SKUs in cache
         const skus = detections.map((d) => d.rawValue)
         const cached = await getStatuses(skus)
 
-        // Fire batch lookup for cache misses
         const misses = skus.filter(
           (sku) => !cached.has(sku) && !inFlightRef.current.has(sku),
         )
@@ -245,7 +284,6 @@ export default function BarcodeScanner() {
             })
         }
 
-        // Merge detections into persistent hitbox map
         for (const det of detections) {
           const entry = cached.get(det.rawValue)
           if (!entry) continue
@@ -272,77 +310,95 @@ export default function BarcodeScanner() {
         }
       }
 
-      // Redraw from the persistent map
-      ctx.clearRect(0, 0, dw, dh)
-
-      const lineWidth = 3
-      const chipFontSize = 11
-      const chipPadX = 4
-      const chipPadY = 2
-      const chipRadius = 3
-
-      for (const [, entry] of hitboxMapRef.current) {
-        const { x, y, w, h, status, name } = entry
-        const color = HITBOX_COLORS[status]
-
-        // Draw rounded rect border
-        ctx.strokeStyle = color
-        ctx.lineWidth = lineWidth
-        ctx.lineJoin = 'round'
-
-        const r = 6
-        ctx.beginPath()
-        ctx.moveTo(x + r, y)
-        ctx.lineTo(x + w - r, y)
-        ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-        ctx.lineTo(x + w, y + h - r)
-        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-        ctx.lineTo(x + r, y + h)
-        ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-        ctx.lineTo(x, y + r)
-        ctx.quadraticCurveTo(x, y, x + r, y)
-        ctx.closePath()
-        ctx.stroke()
-
-        // Draw text label chip above the bounding box
-        const label = name
-          ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
-          : STATUS_LABELS[status]
-
-        ctx.font = `bold ${chipFontSize}px sans-serif`
-        const textWidth = ctx.measureText(label).width
-        const chipW = textWidth + chipPadX * 2
-        const chipH = chipFontSize + chipPadY * 2
-        const chipX = x
-        const chipY = y - chipH - 2
-
-        // Chip background
-        ctx.fillStyle = color
-        ctx.beginPath()
-        ctx.moveTo(chipX + chipRadius, chipY)
-        ctx.lineTo(chipX + chipW - chipRadius, chipY)
-        ctx.quadraticCurveTo(chipX + chipW, chipY, chipX + chipW, chipY + chipRadius)
-        ctx.lineTo(chipX + chipW, chipY + chipH - chipRadius)
-        ctx.quadraticCurveTo(chipX + chipW, chipY + chipH, chipX + chipW - chipRadius, chipY + chipH)
-        ctx.lineTo(chipX + chipRadius, chipY + chipH)
-        ctx.quadraticCurveTo(chipX, chipY + chipH, chipX, chipY + chipH - chipRadius)
-        ctx.lineTo(chipX, chipY + chipRadius)
-        ctx.quadraticCurveTo(chipX, chipY, chipX + chipRadius, chipY)
-        ctx.closePath()
-        ctx.fill()
-
-        // Chip text — WCAG contrast
-        const lum = relativeLuminance(color)
-        ctx.fillStyle = lum > 0.5 ? '#000000' : '#ffffff'
-        ctx.textBaseline = 'top'
-        ctx.fillText(label, chipX + chipPadX, chipY + chipPadY)
-      }
+      drawHitboxes(ctx, dw, dh, hitboxMapRef.current)
     }, 1000)
 
     return () => clearInterval(id)
-  }, [isViewfinderOpen])
+  }, [isViewfinderOpen, currentMode])
 
-  const openViewfinder = useCallback(async () => {
+  // ── OCR detection loop ───────────────────────────────────────
+
+  useEffect(() => {
+    if (!isViewfinderOpen || currentMode !== 'ocr') return
+
+    hitboxMapRef.current.clear()
+    let cancelled = false
+
+    const loop = async () => {
+      while (!cancelled) {
+        const video = videoRef.current
+        const canvas = canvasRef.current
+        if (!video || !canvas || video.readyState < video.HAVE_CURRENT_DATA) {
+          await new Promise((r) => setTimeout(r, 200))
+          continue
+        }
+
+        const dw = video.clientWidth
+        const dh = video.clientHeight
+        if (canvas.width !== dw || canvas.height !== dh) {
+          canvas.width = dw
+          canvas.height = dh
+        }
+
+        const ctx = canvas.getContext('2d')
+        if (!ctx) break
+
+        const now = Date.now()
+        const transform = videoCoverTransform(video)
+
+        const hits = await recognizeCoconutHits(video)
+
+        if (hits && hits.length > 0 && transform) {
+          const { scale, offsetX, offsetY } = transform
+
+          // Clear old OCR entries (they all have key prefix "ocr:")
+          for (const key of hitboxMapRef.current.keys()) {
+            if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
+          }
+
+          for (let i = 0; i < hits.length; i++) {
+            const hit = hits[i]
+            const x = hit.x * scale + offsetX - HITBOX_PADDING
+            const y = hit.y * scale + offsetY - HITBOX_PADDING
+            const w = hit.w * scale + HITBOX_PADDING * 2
+            const h = hit.h * scale + HITBOX_PADDING * 2
+
+            hitboxMapRef.current.set(`ocr:${i}`, {
+              x, y, w, h,
+              status: 'coconut',
+              name: hit.text,
+              lastSeenAt: now,
+            })
+          }
+        }
+
+        // Evict stale entries
+        for (const [key, entry] of hitboxMapRef.current) {
+          if (now - entry.lastSeenAt > HITBOX_RETAIN_MS) {
+            hitboxMapRef.current.delete(key)
+          }
+        }
+
+        drawHitboxes(ctx, dw, dh, hitboxMapRef.current)
+
+        // Wait before next frame to avoid pile-up
+        await new Promise((r) => setTimeout(r, 200))
+      }
+    }
+
+    loop()
+    return () => { cancelled = true }
+  }, [isViewfinderOpen, currentMode])
+
+  // ── Open / close viewfinder ──────────────────────────────────
+
+  const openViewfinder = useCallback(async (mode: ViewfinderMode) => {
+    viewfinderModeRef.current = mode
+
+    if (mode === 'ocr') {
+      initOcr() // ensure worker is starting (idempotent)
+    }
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -352,11 +408,11 @@ export default function BarcodeScanner() {
         },
       })
       streamRef.current = stream
-      setState({ status: 'viewfinder' })
+      setState({ status: 'viewfinder', mode })
     } catch {
       setState({
         status: 'error',
-        message: 'Camera not available. Use the barcode scan button instead.',
+        message: 'Camera not available.',
         inViewfinder: false,
       })
     }
@@ -368,12 +424,14 @@ export default function BarcodeScanner() {
   }, [stopStream])
 
   const handleTap = useCallback(async () => {
+    // Tap-to-scan only in barcode mode
+    if (currentMode !== 'barcode') return
     const canScan =
       state.status === 'viewfinder' ||
       (state.status === 'error' && state.inViewfinder)
     if (!videoRef.current || !canScan) return
 
-    setState({ status: 'processing', source: 'viewfinder' })
+    setState({ status: 'processing', source: 'viewfinder', mode: 'barcode' })
     try {
       const sku = await detectBarcodeBurst(videoRef.current)
       if (!sku) {
@@ -381,6 +439,7 @@ export default function BarcodeScanner() {
           status: 'error',
           message: 'No barcode found. Center the barcode and tap again.',
           inViewfinder: true,
+          mode: 'barcode',
         })
         return
       }
@@ -390,19 +449,20 @@ export default function BarcodeScanner() {
         status: 'error',
         message: 'Could not read barcode. Try again.',
         inViewfinder: true,
+        mode: 'barcode',
       })
     }
-  }, [state.status, handleSKU])
+  }, [state.status, currentMode, handleSKU])
 
   // ── Shared ──────────────────────────────────────────────────
 
   const dismiss = useCallback(() => {
     if (state.status === 'error' && state.inViewfinder) {
-      setState({ status: 'viewfinder' })
+      setState({ status: 'viewfinder', mode: currentMode })
     } else {
       setState({ status: 'idle' })
     }
-  }, [state])
+  }, [state, currentMode])
 
   const busy = state.status === 'processing'
 
@@ -436,12 +496,14 @@ export default function BarcodeScanner() {
           {state.status === 'viewfinder' && (
             <div className="absolute bottom-8 left-0 right-0 text-center">
               <span className="rounded-full bg-black/50 px-4 py-2 text-sm font-medium text-white backdrop-blur-sm">
-                Tap to scan barcode
+                {currentMode === 'barcode'
+                  ? 'Tap to scan barcode'
+                  : 'Point at ingredient list'}
               </span>
             </div>
           )}
 
-          {state.status === 'processing' && (
+          {state.status === 'processing' && currentMode === 'barcode' && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/30">
               <div className="rounded-lg bg-white px-6 py-4 text-sm font-medium text-gray-700 shadow-lg">
                 Reading barcode...
@@ -462,7 +524,7 @@ export default function BarcodeScanner() {
         </div>
       )}
 
-      {/* Error toast (file picker errors) */}
+      {/* Error toast (non-viewfinder errors) */}
       {state.status === 'error' && !state.inViewfinder && (
         <div className="fixed bottom-20 left-1/2 z-50 w-[90vw] max-w-lg -translate-x-1/2">
           <div className="flex items-start gap-2 rounded-lg bg-red-600 px-4 py-3 text-sm text-white shadow-lg">
@@ -474,58 +536,12 @@ export default function BarcodeScanner() {
         </div>
       )}
 
-      {/* Processing overlay (file picker) */}
-      {state.status === 'processing' && state.source === 'file' && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="rounded-lg bg-white px-6 py-4 text-sm font-medium text-gray-700 shadow-lg">
-            Reading barcode...
-          </div>
-        </div>
-      )}
-
-      {/* Hidden file input */}
-      <input
-        ref={inputRef}
-        type="file"
-        accept="image/*"
-        capture="environment"
-        onChange={handleFile}
-        className="hidden"
-      />
-
       {/* Sticky footer — two buttons */}
       <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-lg -translate-x-1/2 p-3">
         <div className="flex gap-2">
-          {/* Blue: file picker barcode scan */}
+          {/* Pink: barcode viewfinder */}
           <button
-            onClick={openFilePicker}
-            disabled={busy}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800 disabled:opacity-60"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="h-5 w-5"
-            >
-              <rect x="2" y="4" width="20" height="16" rx="2" />
-              <line x1="6" y1="8" x2="6" y2="16" />
-              <line x1="8.5" y1="8" x2="8.5" y2="16" />
-              <line x1="11" y1="8" x2="11" y2="16" />
-              <line x1="14" y1="8" x2="14" y2="16" />
-              <line x1="16.5" y1="8" x2="16.5" y2="16" />
-              <line x1="18" y1="8" x2="18" y2="16" />
-            </svg>
-            Scan Barcode
-          </button>
-
-          {/* Pink: live viewfinder */}
-          <button
-            onClick={openViewfinder}
+            onClick={() => openViewfinder('barcode')}
             disabled={busy}
             className="flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors disabled:opacity-60"
             style={{ backgroundColor: '#f15c99' }}
@@ -540,11 +556,37 @@ export default function BarcodeScanner() {
               strokeLinejoin="round"
               className="h-5 w-5"
             >
-              {/* Camera/viewfinder icon */}
               <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
               <circle cx="12" cy="13" r="4" />
             </svg>
             bARcode Glance
+          </button>
+
+          {/* Blue: OCR viewfinder */}
+          <button
+            onClick={() => openViewfinder('ocr')}
+            disabled={busy || ocrReady === 'error'}
+            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800 disabled:opacity-60"
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-5 w-5"
+            >
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+              <polyline points="14 2 14 8 20 8" />
+              <line x1="16" y1="13" x2="8" y2="13" />
+              <line x1="16" y1="17" x2="8" y2="17" />
+              <polyline points="10 9 9 9 8 9" />
+            </svg>
+            {ocrReady === 'loading' ? 'Loading OCR...' :
+             ocrReady === 'error' ? 'OCR Error' :
+             'Ingredient OCR'}
           </button>
         </div>
       </div>
