@@ -593,3 +593,41 @@ Set up Vitest + test suite for OCR:
 - Coconut layer renders underneath, prohibition sign overlays on top (transparent center shows coconut through)
 - Placed in `frontend/public/favicon.svg` (Vite copies to root on build)
 - Added `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />` to `index.html`
+
+## 2026-03-25 — Session 19: Progress Tracking + Full OFF Database + Configurable Allergens
+
+### Three Related Changes
+
+**1. Ingestion Progress Tracking**
+- Added `Progress` struct to `scheduler.go` with `Phase`/`Current`/`Total` fields, stored in `atomic.Value`
+- `RunOFF` now accepts a `ProgressFunc` callback, called during download (counting reader every ~512KB), query, and upsert (every 100 products)
+- Health endpoint (`GET /api/health`) returns progress alongside `ready` status
+- Splash screen shows a progress bar with phase-aware text: "Downloading... 45%", "Processing products...", "Loading products... 5,000 / 150,000"
+- Removed 15s safety timeout, replaced with 5-minute timeout (progress bar makes the wait transparent)
+
+**2. Full OFF Database**
+- Removed the 10-line frozen dessert category filter from the DuckDB query
+- Now ingests ALL products matching the country filter (not just ice cream/sorbet/gelato)
+- Supports the barcode-scan-anything use case (handsoap incident from Session 4)
+
+**3. Configurable Allergens + Country**
+- `ALLERGEN_KEYWORDS` env var (default `coconut,cocos nucifera,copra`) — parsed once via `sync.Once`, split/lowered/trimmed
+- `INGEST_COUNTRIES` env var (default `en:united-states`) — set to `-` for all countries
+- Dockerfile bakes sensible defaults for all env vars (PORT, FRONTEND_DIR, MIGRATIONS_DIR, DATA_DIR, INGEST_INTERVAL, INGEST_COUNTRIES, ALLERGEN_KEYWORDS)
+- Project can now be forked for any allergen with zero code changes
+
+### New Documentation
+- `docs/DEPLOYMENT.md` — quick start, docker compose example, env var reference table, volume mounts
+- `docs/OTHER_ALLERGIES.md` — forking guide with examples for peanuts, soy, gluten, tree nuts
+
+### Files Changed
+- `backend/internal/coconut/detect.go` — configurable keywords from env
+- `backend/internal/ingest/scheduler.go` — Progress struct + atomic
+- `backend/internal/ingest/off.go` — ProgressFunc, counting reader, remove category filter, configurable country
+- `backend/internal/api/routes.go` — progress in health response
+- `backend/main.go` — wire progress func
+- `Dockerfile` — bake ENV defaults
+- `frontend/src/api/client.ts` — HealthResponse type
+- `frontend/src/components/SplashScreen.tsx` — loading bar + phase text
+- `docs/DEPLOYMENT.md` — NEW
+- `docs/OTHER_ALLERGIES.md` — NEW

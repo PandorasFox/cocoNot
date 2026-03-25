@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,6 +20,9 @@ import (
 
 	"github.com/hecate/coconutfree/internal/coconut"
 )
+
+// ProgressFunc is called to report ingestion progress.
+type ProgressFunc func(phase string, current, total int64)
 
 const (
 	parquetURL  = "https://huggingface.co/datasets/openfoodfacts/product-database/resolve/main/food.parquet"
@@ -35,8 +40,11 @@ type offProduct struct {
 }
 
 // RunOFF downloads the Open Food Facts parquet file (if needed) and ingests
-// US frozen dessert products into the database.
-func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string) error {
+// products into the database. Country filter is configurable via INGEST_COUNTRIES.
+func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string, onProgress ProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(string, int64, int64) {}
+	}
 	if dataDir == "" {
 		dataDir = defaultDir
 	}
@@ -46,7 +54,8 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string) error {
 	// Download if missing or stale (older than 24h)
 	if needsDownload(parquetPath) {
 		log.Println("Downloading Open Food Facts parquet file...")
-		if err := downloadParquet(ctx, parquetPath); err != nil {
+		onProgress("downloading", 0, 0)
+		if err := downloadParquet(ctx, parquetPath, onProgress); err != nil {
 			return fmt.Errorf("downloading parquet: %w", err)
 		}
 		log.Println("Download complete")
@@ -55,16 +64,29 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string) error {
 	}
 
 	// Query with DuckDB
-	log.Println("Querying parquet for US frozen desserts...")
-	products, err := queryParquet(parquetPath)
+	country := os.Getenv("INGEST_COUNTRIES")
+	if country == "" {
+		country = "en:united-states"
+	}
+	if country == "-" {
+		country = "" // explicit empty = all countries
+	}
+	if country != "" {
+		log.Printf("Querying parquet for products (country: %s)...", country)
+	} else {
+		log.Println("Querying parquet for all products (no country filter)...")
+	}
+	onProgress("querying", 0, 0)
+	products, err := queryParquet(parquetPath, country)
 	if err != nil {
 		return fmt.Errorf("querying parquet: %w", err)
 	}
 	log.Printf("Found %d products", len(products))
+	onProgress("querying", int64(len(products)), int64(len(products)))
 
 	// Upsert into Postgres
 	log.Println("Upserting into database...")
-	stats, err := upsertProducts(ctx, pool, products)
+	stats, err := upsertProducts(ctx, pool, products, onProgress)
 	if err != nil {
 		return fmt.Errorf("upserting products: %w", err)
 	}
@@ -82,7 +104,29 @@ func needsDownload(path string) bool {
 	return time.Since(info.ModTime()) > 24*time.Hour
 }
 
-func downloadParquet(ctx context.Context, dest string) error {
+// countingReader wraps an io.Reader and reports progress.
+type countingReader struct {
+	reader     io.Reader
+	total      int64
+	read       atomic.Int64
+	onProgress ProgressFunc
+	lastReport int64
+}
+
+func (cr *countingReader) Read(p []byte) (int, error) {
+	n, err := cr.reader.Read(p)
+	if n > 0 {
+		current := cr.read.Add(int64(n))
+		// Report every ~512KB
+		if current-cr.lastReport >= 512*1024 || err == io.EOF {
+			cr.lastReport = current
+			cr.onProgress("downloading", current, cr.total)
+		}
+	}
+	return n, err
+}
+
+func downloadParquet(ctx context.Context, dest string, onProgress ProgressFunc) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return err
 	}
@@ -110,18 +154,25 @@ func downloadParquet(ctx context.Context, dest string) error {
 		return fmt.Errorf("unexpected status: %d", resp.StatusCode)
 	}
 
-	size, err := io.Copy(out, resp.Body)
+	var total int64
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		total, _ = strconv.ParseInt(cl, 10, 64)
+	}
+
+	cr := &countingReader{reader: resp.Body, total: total, onProgress: onProgress}
+	size, err := io.Copy(out, cr)
 	if err != nil {
 		os.Remove(tmpPath)
 		return err
 	}
 
+	onProgress("downloading", size, size)
 	log.Printf("Downloaded %.1f MB", float64(size)/1024/1024)
 
 	return os.Rename(tmpPath, dest)
 }
 
-func queryParquet(path string) ([]offProduct, error) {
+func queryParquet(path string, country string) ([]offProduct, error) {
 	db, err := sql.Open("duckdb", "")
 	if err != nil {
 		return nil, fmt.Errorf("opening duckdb: %w", err)
@@ -229,6 +280,11 @@ func queryParquet(path string) ([]offProduct, error) {
 		ingredientsAllExpr = "CONCAT_WS(' ', " + strings.Join(ingredientsCols, ", ") + ")"
 	}
 
+	countryFilter := ""
+	if country != "" {
+		countryFilter = fmt.Sprintf("AND list_contains(countries_tags, '%s')", country)
+	}
+
 	query := fmt.Sprintf(`
 		SELECT
 			CAST(code AS VARCHAR) AS code,
@@ -239,22 +295,10 @@ func queryParquet(path string) ([]offProduct, error) {
 			%s AS img_url,
 			%s AS cats
 		FROM '%s'
-		WHERE list_contains(countries_tags, 'en:united-states')
-			AND (
-				list_contains(categories_tags, 'en:ice-creams-and-sorbets')
-				OR list_contains(categories_tags, 'en:frozen-desserts')
-				OR list_contains(categories_tags, 'en:ice-creams')
-				OR list_contains(categories_tags, 'en:sorbets')
-				OR list_contains(categories_tags, 'en:gelati')
-				OR list_contains(categories_tags, 'en:frozen-yogurts')
-				OR list_contains(categories_tags, 'en:ice-cream-bars')
-				OR list_contains(categories_tags, 'en:ice-cream-sandwiches')
-				OR list_contains(categories_tags, 'en:ice-cream-tubs')
-				OR list_contains(categories_tags, 'en:popsicles')
-			)
-			AND code IS NOT NULL
+		WHERE code IS NOT NULL
 			AND CAST(code AS VARCHAR) != ''
-	`, toStr("product_name"), toStr("brands"), ingredientsExpr, ingredientsAllExpr, imgExpr, toStr("categories_tags"), path)
+			%s
+	`, toStr("product_name"), toStr("brands"), ingredientsExpr, ingredientsAllExpr, imgExpr, toStr("categories_tags"), path, countryFilter)
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -289,11 +333,15 @@ type upsertStats struct {
 	unchanged int // user-flagged, completely skipped
 }
 
-func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct) (upsertStats, error) {
+func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct, onProgress ProgressFunc) (upsertStats, error) {
 	var stats upsertStats
 	now := time.Now()
+	total := int64(len(products))
 
-	for _, p := range products {
+	for i, p := range products {
+		if i%100 == 0 {
+			onProgress("upserting", int64(i), total)
+		}
 		if p.Code == "" || (p.ProductName == "" && p.Brands == "") {
 			continue
 		}
@@ -421,6 +469,7 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 		}
 	}
 
+	onProgress("upserting", total, total)
 	return stats, nil
 }
 

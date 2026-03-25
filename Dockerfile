@@ -28,7 +28,14 @@ COPY --from=frontend-build /build/dist ./static
 COPY backend/migrations ./migrations
 COPY docker-entrypoint.sh .
 ENV DATABASE_URL=postgres://coconutfree:coconutfree@localhost:5432/coconutfree?sslmode=disable \
-    PATH="/usr/lib/postgresql/15/bin:$PATH"
+    PATH="/usr/lib/postgresql/15/bin:$PATH" \
+    PORT=8080 \
+    FRONTEND_DIR=/app/static \
+    MIGRATIONS_DIR=file:///app/migrations \
+    DATA_DIR=/data \
+    INGEST_INTERVAL=6h \
+    INGEST_COUNTRIES=en:united-states \
+    ALLERGEN_KEYWORDS=coconut,cocos\ nucifera,copra
 EXPOSE 8080
 ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["./coconutfree"]

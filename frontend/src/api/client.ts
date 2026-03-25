@@ -84,8 +84,13 @@ export interface SKULookupResult {
   contains_coconut: boolean | null
 }
 
+export interface HealthResponse {
+  ready: boolean
+  progress?: { phase: string; current: number; total: number }
+}
+
 export function checkHealth() {
-  return fetchJSON<{ ready: boolean }>('/health')
+  return fetchJSON<HealthResponse>('/health')
 }
 
 export function skuLookup(skus: string[]) {

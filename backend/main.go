@@ -46,7 +46,7 @@ func main() {
 			if dataDir == "" {
 				dataDir = "/data"
 			}
-			if err := ingest.RunOFF(ctx, pool, dataDir); err != nil {
+			if err := ingest.RunOFF(ctx, pool, dataDir, nil); err != nil {
 				log.Fatalf("Ingestion failed: %v", err)
 			}
 			return
@@ -74,10 +74,12 @@ func main() {
 
 	queries := db.NewQueries(pool)
 	readyFunc := func() bool { return true }
+	progressFunc := func() *ingest.Progress { return &ingest.Progress{Phase: "idle"} }
 	if sched != nil {
 		readyFunc = sched.Ready
+		progressFunc = sched.GetProgress
 	}
-	router := api.NewRouter(queries, readyFunc)
+	router := api.NewRouter(queries, readyFunc, progressFunc)
 
 	// Serve frontend static files
 	frontendDir := os.Getenv("FRONTEND_DIR")
