@@ -234,8 +234,8 @@ export default function BarcodeScanner() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
-          width: { ideal: 2560 },
-          height: { ideal: 1440 },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
         },
       })
       streamRef.current = stream

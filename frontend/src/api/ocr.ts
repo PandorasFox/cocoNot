@@ -21,9 +21,9 @@ export interface Tile {
 
 // ── Constants ─────────────────────────────────────────────────
 
-export const POOL_SIZE = 4
-export const TILE_SIZE = 960
-export const TILE_OVERLAP = 200
+export const POOL_SIZE = 2
+export const TILE_SIZE = 1024
+export const TILE_OVERLAP = 80
 
 // ── Worker pool state ─────────────────────────────────────────
 
@@ -329,16 +329,23 @@ export async function recognizeWords(
 ): Promise<OcrHit[] | null> {
   if (workers.length === 0 || readyState !== 'ready') return null
 
-  const w = video.videoWidth
-  const h = video.videoHeight
-  if (!w || !h) return null
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  if (!vw || !vh) return null
 
-  // Capture full-resolution frame
-  const frame = new OffscreenCanvas(w, h)
-  frame.getContext('2d')!.drawImage(video, 0, 0, w, h)
+  // Crop any dimension that's barely over TILE_SIZE (e.g. 1080 → 1024 in
+  // portrait) to avoid creating two nearly-identical tiles on that axis.
+  // Only tile the long axis.
+  const cropThreshold = TILE_SIZE * 1.1
+  const cropW = (vw > TILE_SIZE && vw <= cropThreshold) ? TILE_SIZE : vw
+  const cropH = (vh > TILE_SIZE && vh <= cropThreshold) ? TILE_SIZE : vh
+  const cropX = Math.round((vw - cropW) / 2)
+  const cropY = Math.round((vh - cropH) / 2)
 
-  // Split into preprocessed tiles
-  const tiles = createTiles(frame, w, h)
+  const frame = new OffscreenCanvas(cropW, cropH)
+  frame.getContext('2d')!.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH)
+
+  const tiles = createTiles(frame, cropW, cropH)
 
   // Work-stealing: each worker grabs the next available tile
   let nextIdx = 0
@@ -353,12 +360,12 @@ export async function recognizeWords(
         const result = await worker.recognize(tiles[idx].canvas, {}, { blocks: true })
         const words = flattenWords(result.data.blocks)
         const hits = tagCoconutWords(words)
-        // Map tile-local coordinates to frame-global
+        // Map tile-local coordinates back to full video frame
         const tile = tiles[idx]
         tileResults[idx] = hits.map(hit => ({
           ...hit,
-          x: hit.x + tile.offsetX,
-          y: hit.y + tile.offsetY,
+          x: hit.x + tile.offsetX + cropX,
+          y: hit.y + tile.offsetY + cropY,
         }))
       } catch {
         tileResults[idx] = []
