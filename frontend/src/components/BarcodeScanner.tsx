@@ -326,7 +326,7 @@ export default function BarcodeScanner() {
           )}
 
           {/* Debug status pill (dev only) */}
-          {(import.meta.env.DEV || import.meta.env.VITE_DEBUG === '1') && isViewfinderOpen && (
+          {isViewfinderOpen && (
             <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
               <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady}</div>
               <div>frames: {ocrDebug.frames}</div>
