@@ -60,16 +60,16 @@ export default function SplashScreen() {
     switch (progress.phase) {
       case 'downloading':
         message = pct !== null
-          ? `Downloading product database... ${pct}%`
-          : `Downloading product database...`
+          ? `Server starting up — downloading products... ${pct}%`
+          : `Server starting up — downloading products...`
         break
       case 'querying':
-        message = 'Processing products...'
+        message = 'Server starting up — processing products...'
         break
       case 'upserting':
         message = progress.total > 0
-          ? `Loading products... ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()}`
-          : 'Loading products...'
+          ? `Server starting up — loading ${progress.current.toLocaleString()} / ${progress.total.toLocaleString()} products`
+          : 'Server starting up — loading products...'
         break
       default:
         message = 'Server starting up...'

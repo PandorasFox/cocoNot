@@ -20,8 +20,19 @@ export default function Home() {
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(false)
 
+  const hasQuery = query.trim() !== '' || filter !== 'all'
+
   const search = useCallback(async () => {
     const q = query.trim()
+
+    // Don't fetch the default product list — only search when there's a query or filter
+    if (q === '' && filter === 'all') {
+      setProducts([])
+      setTotal(0)
+      setLoading(false)
+      return
+    }
+
     setLoading(true)
     try {
       // If it looks like a SKU, try direct lookup first
@@ -92,13 +103,13 @@ export default function Home() {
 
       {loading ? (
         <p className="py-8 text-center text-sm text-gray-400">Searching...</p>
+      ) : !hasQuery ? (
+        <div className="flex flex-1 items-center justify-center py-16">
+          <img src="/favicon.svg" alt="CocoNot" className="h-32 w-32 opacity-20" />
+        </div>
       ) : products.length === 0 ? (
         <div className="py-12 text-center">
-          <p className="text-gray-500">
-            {total === 0 && query === ''
-              ? 'No products yet. Data will appear once ingestion runs.'
-              : 'No products found.'}
-          </p>
+          <p className="text-gray-500">No products found.</p>
         </div>
       ) : (
         <>
