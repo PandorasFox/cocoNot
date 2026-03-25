@@ -82,6 +82,38 @@ export default function BarcodeScanner() {
 
   // ── Live viewfinder (pink button) ───────────────────────────
 
+  const isViewfinderOpen =
+    state.status === 'viewfinder' ||
+    (state.status === 'processing' && state.source === 'viewfinder') ||
+    (state.status === 'error' && state.inViewfinder)
+
+  // Attach stream to video element once the viewfinder mounts
+  useEffect(() => {
+    const video = videoRef.current
+    const stream = streamRef.current
+    if (!video || !stream || !isViewfinderOpen) return
+
+    // Firefox mobile needs srcObject set and play() called explicitly.
+    // Setting attributes directly for maximum compatibility.
+    video.setAttribute('autoplay', '')
+    video.setAttribute('playsinline', '')
+    video.srcObject = stream
+
+    const startPlayback = () => {
+      video.play().catch(() => {
+        // play() can reject if the user switches away quickly — harmless
+      })
+    }
+
+    // If the video already has data, play immediately; otherwise wait
+    if (video.readyState >= video.HAVE_METADATA) {
+      startPlayback()
+    } else {
+      video.addEventListener('loadedmetadata', startPlayback, { once: true })
+      return () => video.removeEventListener('loadedmetadata', startPlayback)
+    }
+  }, [isViewfinderOpen])
+
   const openViewfinder = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -93,12 +125,6 @@ export default function BarcodeScanner() {
       })
       streamRef.current = stream
       setState({ status: 'viewfinder' })
-
-      requestAnimationFrame(() => {
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream
-        }
-      })
     } catch {
       setState({
         status: 'error',
@@ -146,11 +172,6 @@ export default function BarcodeScanner() {
       setState({ status: 'idle' })
     }
   }, [state])
-
-  const isViewfinderOpen =
-    state.status === 'viewfinder' ||
-    (state.status === 'processing' && state.source === 'viewfinder') ||
-    (state.status === 'error' && state.inViewfinder)
 
   const busy = state.status === 'processing'
 
