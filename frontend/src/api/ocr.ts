@@ -21,7 +21,7 @@ export interface Tile {
 
 // ── Constants ─────────────────────────────────────────────────
 
-export const POOL_SIZE = 4
+export const POOL_SIZE = 1
 export const TILE_SIZE = 1600
 export const TILE_OVERLAP = 200
 

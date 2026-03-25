@@ -4,6 +4,8 @@ WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm install --legacy-peer-deps
 COPY frontend/ ./
+ARG VITE_DEBUG=0
+ENV VITE_DEBUG=$VITE_DEBUG
 RUN npm run build
 
 # Stage 2: Build backend (Debian — DuckDB's static lib needs glibc)
