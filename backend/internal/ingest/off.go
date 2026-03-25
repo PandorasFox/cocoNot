@@ -11,12 +11,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	_ "github.com/marcboeker/go-duckdb"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/hecate/coconutfree/internal/coconut"
 )
@@ -333,37 +336,40 @@ type upsertStats struct {
 	unchanged int // user-flagged, completely skipped
 }
 
-func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct, onProgress ProgressFunc) (upsertStats, error) {
-	var stats upsertStats
-	now := time.Now()
-	total := int64(len(products))
+const (
+	upsertChunkSize = 1000
+	upsertWorkers   = 8
+)
 
+// preparedProduct holds pre-computed fields ready for DB upsert.
+type preparedProduct struct {
+	code            string
+	brand           string
+	name            string
+	category        string
+	ingredientsText string
+	imageURL        *string
+	coconutFound    bool
+	hasIngredients  bool
+	containsCoconut *bool
+}
+
+// prepareProducts pre-computes coconut detection, classification, and field
+// normalization for all products. Filters out invalid entries and deduplicates
+// by SKU (keeps last occurrence).
+func prepareProducts(products []offProduct) []preparedProduct {
+	// Deduplicate by SKU — keep last occurrence (matches old sequential behavior)
+	seen := make(map[string]int, len(products))
 	for i, p := range products {
-		if i%100 == 0 {
-			onProgress("upserting", int64(i), total)
-		}
 		if p.Code == "" || (p.ProductName == "" && p.Brands == "") {
 			continue
 		}
+		seen[p.Code] = i
+	}
 
-		category := classifyCategory(p.CategoriesTags)
-		// Detect coconut across ALL language variants, not just the displayed EN text
-		coconutFound := coconut.Detect(p.IngredientsAll)
-		hasIngredients := strings.TrimSpace(p.IngredientsText) != "" || strings.TrimSpace(p.IngredientsAll) != ""
-
-		// Determine coconut status:
-		// - If ingredients present and coconut found -> true
-		// - If ingredients present and no coconut -> false
-		// - If no ingredients text -> NULL (unknown)
-		var containsCoconut *bool
-		if hasIngredients {
-			containsCoconut = &coconutFound
-		}
-
-		var imageURL *string
-		if p.ImageURL != "" {
-			imageURL = &p.ImageURL
-		}
+	result := make([]preparedProduct, 0, len(seen))
+	for _, idx := range seen {
+		p := products[idx]
 
 		brand := p.Brands
 		if brand == "" {
@@ -374,102 +380,230 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 			name = "Unknown Product"
 		}
 
-		// Check if product exists
-		var existingID uuid.UUID
-		var existingCoconut *bool
-		err := pool.QueryRow(ctx,
-			"SELECT id, contains_coconut FROM products WHERE sku = $1", p.Code,
-		).Scan(&existingID, &existingCoconut)
+		coconutFound := coconut.Detect(p.IngredientsAll)
+		hasIngredients := strings.TrimSpace(p.IngredientsText) != "" || strings.TrimSpace(p.IngredientsAll) != ""
 
-		if err != nil {
-			// Product doesn't exist — insert
-			id := uuid.New()
-			_, err = pool.Exec(ctx, `
-				INSERT INTO products (id, sku, brand, name, category, image_url, contains_coconut, status_as_of, created_at, updated_at)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-			`, id, p.Code, brand, name, category, imageURL, containsCoconut, now, now)
+		var containsCoconut *bool
+		if hasIngredients {
+			containsCoconut = &coconutFound
+		}
+
+		var imageURL *string
+		if p.ImageURL != "" {
+			imageURL = &p.ImageURL
+		}
+
+		result = append(result, preparedProduct{
+			code:            p.Code,
+			brand:           brand,
+			name:            name,
+			category:        classifyCategory(p.CategoriesTags),
+			ingredientsText: p.IngredientsText,
+			imageURL:        imageURL,
+			coconutFound:    coconutFound,
+			hasIngredients:  hasIngredients,
+			containsCoconut: containsCoconut,
+		})
+	}
+	return result
+}
+
+func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct, onProgress ProgressFunc) (upsertStats, error) {
+	// Phase 1: Pre-compute all product data (CPU-bound, fast)
+	log.Println("Pre-computing product data...")
+	prepared := prepareProducts(products)
+	total := int64(len(prepared))
+	log.Printf("Prepared %d valid products (deduped from %d)", total, len(products))
+
+	// Phase 2: Chunk and fan out to worker pool
+	var (
+		mu        sync.Mutex
+		stats     upsertStats
+		processed atomic.Int64
+	)
+	now := time.Now()
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(upsertWorkers)
+
+	for i := 0; i < len(prepared); i += upsertChunkSize {
+		end := i + upsertChunkSize
+		if end > len(prepared) {
+			end = len(prepared)
+		}
+		chunk := prepared[i:end]
+
+		g.Go(func() error {
+			s, err := processChunk(gctx, pool, chunk, now)
 			if err != nil {
-				return stats, fmt.Errorf("inserting product %s: %w", p.Code, err)
+				return err
 			}
 
-			// Add ingredient source
-			if hasIngredients {
-				_, err = pool.Exec(ctx, `
-					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
-					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
-					ON CONFLICT (product_id, source_type) DO UPDATE SET
-						ingredients_raw = EXCLUDED.ingredients_raw,
-						coconut_found = EXCLUDED.coconut_found,
-						fetched_at = EXCLUDED.fetched_at
-				`, uuid.New(), id, p.Code, p.IngredientsText, coconutFound, now)
-				if err != nil {
-					return stats, fmt.Errorf("inserting source for %s: %w", p.Code, err)
-				}
+			mu.Lock()
+			stats.inserted += s.inserted
+			stats.updated += s.updated
+			stats.refreshed += s.refreshed
+			stats.unchanged += s.unchanged
+			mu.Unlock()
+
+			cur := processed.Add(int64(len(chunk)))
+			onProgress("upserting", cur, total)
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return stats, err
+	}
+
+	onProgress("upserting", total, total)
+	return stats, nil
+}
+
+type existingProduct struct {
+	id              uuid.UUID
+	containsCoconut *bool
+}
+
+// processChunk handles a batch of products: bulk-reads existing state, then
+// pipelines all writes through a single pgx.Batch inside a transaction.
+func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProduct, now time.Time) (upsertStats, error) {
+	var stats upsertStats
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return stats, fmt.Errorf("begin tx: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	// Bulk lookup existing products by SKU
+	skus := make([]string, len(chunk))
+	for i, p := range chunk {
+		skus[i] = p.code
+	}
+
+	existing := make(map[string]existingProduct, len(chunk))
+	rows, err := tx.Query(ctx, "SELECT sku, id, contains_coconut FROM products WHERE sku = ANY($1)", skus)
+	if err != nil {
+		return stats, fmt.Errorf("bulk lookup: %w", err)
+	}
+	for rows.Next() {
+		var sku string
+		var ep existingProduct
+		if err := rows.Scan(&sku, &ep.id, &ep.containsCoconut); err != nil {
+			rows.Close()
+			return stats, fmt.Errorf("scanning existing: %w", err)
+		}
+		existing[sku] = ep
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return stats, fmt.Errorf("bulk lookup rows: %w", err)
+	}
+
+	// Bulk lookup user flags for existing products
+	flagged := make(map[uuid.UUID]bool)
+	if len(existing) > 0 {
+		ids := make([]uuid.UUID, 0, len(existing))
+		for _, ep := range existing {
+			ids = append(ids, ep.id)
+		}
+
+		flagRows, err := tx.Query(ctx,
+			"SELECT DISTINCT product_id FROM user_flags WHERE product_id = ANY($1) AND flag_type = 'found_coconut' AND resolved = false",
+			ids,
+		)
+		if err != nil {
+			return stats, fmt.Errorf("bulk flag lookup: %w", err)
+		}
+		for flagRows.Next() {
+			var pid uuid.UUID
+			if err := flagRows.Scan(&pid); err != nil {
+				flagRows.Close()
+				return stats, fmt.Errorf("scanning flag: %w", err)
 			}
+			flagged[pid] = true
+		}
+		flagRows.Close()
+	}
 
-			stats.inserted++
-		} else {
-			// Product exists — check if status changed
-			// But DON'T override user flags: if a user flagged coconut, keep it
-			var hasUserCoconutFlag bool
-			pool.QueryRow(ctx,
-				"SELECT EXISTS(SELECT 1 FROM user_flags WHERE product_id = $1 AND flag_type = 'found_coconut' AND resolved = false)",
-				existingID,
-			).Scan(&hasUserCoconutFlag)
+	// Build pipelined batch of all writes
+	batch := &pgx.Batch{}
 
-			if hasUserCoconutFlag {
-				// User flag takes priority — don't update coconut status
+	for _, p := range chunk {
+		if ep, ok := existing[p.code]; ok {
+			// Existing product — respect user flags
+			if flagged[ep.id] {
 				stats.unchanged++
 				continue
 			}
 
-			statusChanged := !boolPtrEqual(existingCoconut, containsCoconut)
-
+			statusChanged := !boolPtrEqual(ep.containsCoconut, p.containsCoconut)
 			if statusChanged {
-				// Log the change
-				_, err = pool.Exec(ctx, `
+				batch.Queue(`
 					INSERT INTO status_changelog (id, product_id, old_contains_coconut, new_contains_coconut, reason, changed_at)
 					VALUES ($1, $2, $3, $4, $5, $6)
-				`, uuid.New(), existingID, existingCoconut, containsCoconut, "Open Food Facts data update", now)
-				if err != nil {
-					return stats, fmt.Errorf("logging change for %s: %w", p.Code, err)
-				}
+				`, uuid.New(), ep.id, ep.containsCoconut, p.containsCoconut, "Open Food Facts data update", now)
+				stats.updated++
+			} else {
+				stats.refreshed++
 			}
 
-			// Update product
-			_, err = pool.Exec(ctx, `
+			batch.Queue(`
 				UPDATE products SET brand = $1, name = $2, category = $3, image_url = $4,
 					contains_coconut = $5, status_as_of = $6, updated_at = $6
 				WHERE id = $7
-			`, brand, name, category, imageURL, containsCoconut, now, existingID)
-			if err != nil {
-				return stats, fmt.Errorf("updating product %s: %w", p.Code, err)
-			}
+			`, p.brand, p.name, p.category, p.imageURL, p.containsCoconut, now, ep.id)
 
-			// Upsert ingredient source
-			if hasIngredients {
-				_, err = pool.Exec(ctx, `
+			if p.hasIngredients {
+				batch.Queue(`
 					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
 					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
 					ON CONFLICT (product_id, source_type) DO UPDATE SET
 						ingredients_raw = EXCLUDED.ingredients_raw,
 						coconut_found = EXCLUDED.coconut_found,
 						fetched_at = EXCLUDED.fetched_at
-				`, uuid.New(), existingID, p.Code, p.IngredientsText, coconutFound, now)
-				if err != nil {
-					return stats, fmt.Errorf("upserting source for %s: %w", p.Code, err)
-				}
+				`, uuid.New(), ep.id, p.code, p.ingredientsText, p.coconutFound, now)
+			}
+		} else {
+			// New product — insert
+			id := uuid.New()
+			batch.Queue(`
+				INSERT INTO products (id, sku, brand, name, category, image_url, contains_coconut, status_as_of, created_at, updated_at)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
+			`, id, p.code, p.brand, p.name, p.category, p.imageURL, p.containsCoconut, now, now)
+
+			if p.hasIngredients {
+				batch.Queue(`
+					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
+					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
+					ON CONFLICT (product_id, source_type) DO UPDATE SET
+						ingredients_raw = EXCLUDED.ingredients_raw,
+						coconut_found = EXCLUDED.coconut_found,
+						fetched_at = EXCLUDED.fetched_at
+				`, uuid.New(), id, p.code, p.ingredientsText, p.coconutFound, now)
 			}
 
-			if statusChanged {
-				stats.updated++
-			} else {
-				stats.refreshed++
-			}
+			stats.inserted++
 		}
 	}
 
-	onProgress("upserting", total, total)
+	// Execute all writes in one pipelined round-trip
+	if batch.Len() > 0 {
+		br := tx.SendBatch(ctx, batch)
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err != nil {
+				br.Close()
+				return stats, fmt.Errorf("batch exec (query %d/%d): %w", i+1, batch.Len(), err)
+			}
+		}
+		br.Close()
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return stats, fmt.Errorf("commit: %w", err)
+	}
+
 	return stats, nil
 }
 

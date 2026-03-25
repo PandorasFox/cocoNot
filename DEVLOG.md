@@ -631,3 +631,48 @@ Set up Vitest + test suite for OCR:
 - `frontend/src/components/SplashScreen.tsx` — loading bar + phase text
 - `docs/DEPLOYMENT.md` — NEW
 - `docs/OTHER_ALLERGIES.md` — NEW
+
+## 2026-03-25 — Unified "cocoNot vision" Lens
+
+### Problem
+Barcode scanning and OCR ingredient reading were split into two separate camera modes with two footer buttons. Users had to choose which detection to run, adding friction.
+
+### Solution
+Consolidated into a single "cocoNot vision" button that runs both barcode detection and OCR concurrently at 1s intervals:
+- Barcode detection (hardware-accelerated BarcodeDetector API, ~5ms) and OCR (Tesseract.js Web Worker) run in parallel each tick via `Promise.all`
+- OCR slowed from 200ms → 1000ms intervals (less aggressive, matches barcode cadence)
+- OCR backpressure: skips OCR tick if previous call still running (prevents pile-up on slow phones)
+- Only coconut OCR matches shown in overlay (non-coconut word boxes were noise)
+- Unified draw function renders both barcode hitboxes (product name/status chips) and OCR coconut hits
+- OCR worker self-heals if it crashes mid-session
+- Single `#f51c99` footer button replaces two separate buttons
+
+### Performance
+Totally fine — barcode detection is nearly free (native API), OCR runs on a separate worker thread. No resource contention. At 1s intervals, battery impact is modest.
+
+### Files changed
+- `frontend/src/components/BarcodeScanner.tsx` — consolidated from 691 → ~530 lines
+
+## 2026-03-25 — Parallelize Product Ingestion
+
+### Problem
+Upserting ~800K products into PostgreSQL took 15-25 minutes due to sequential per-product SQL round-trips (~2-4 queries each = ~2M total round-trips).
+
+### Solution
+Replaced the sequential upsert loop with a chunked worker pool + `pgx.Batch` pipeline:
+
+1. **Pre-compute phase**: Coconut detection, category classification, field normalization, and SKU deduplication done up front (pure CPU, fast)
+2. **Chunk into batches of 1000** products each
+3. **8 worker goroutines** via `errgroup` process chunks in parallel
+4. **Per chunk** (3 round-trips instead of ~3000):
+   - Bulk `SELECT ... WHERE sku = ANY($1)` to find existing products
+   - Bulk `SELECT ... WHERE product_id = ANY($1)` to find user flags
+   - `pgx.Batch` pipelines all INSERT/UPDATE/UPSERT writes in a single transaction
+5. Atomic progress counter for thread-safe progress reporting
+
+### Expected speedup
+- Old: 800K × 2-4 sequential round-trips = ~2M SQL operations → 15-25 min
+- New: 800 chunks × 3 pipelined round-trips, 8 workers → estimated 30-90 sec
+
+### Files changed
+- `backend/internal/ingest/off.go` — new `prepareProducts()`, `processChunk()`, chunked `upsertProducts()` with errgroup worker pool

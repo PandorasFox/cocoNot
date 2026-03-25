@@ -5,13 +5,11 @@ import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound, type CachedSKU } from '../api/cache'
 import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
 
-type ViewfinderMode = 'barcode' | 'ocr'
-
 type ScanState =
   | { status: 'idle' }
-  | { status: 'viewfinder'; mode: ViewfinderMode }
-  | { status: 'processing'; source: 'viewfinder'; mode: ViewfinderMode }
-  | { status: 'error'; message: string; inViewfinder: boolean; mode?: ViewfinderMode }
+  | { status: 'viewfinder' }
+  | { status: 'processing'; source: 'viewfinder' }
+  | { status: 'error'; message: string; inViewfinder: boolean }
 
 // Colors for hitbox borders
 const HITBOX_COLORS: Record<CachedSKU['status'] | 'coconut_ocr', string> = {
@@ -81,8 +79,8 @@ function videoCoverTransform(video: HTMLVideoElement) {
   return { scale, offsetX, offsetY }
 }
 
-/** Draw hitboxes from the persistent map onto the canvas. */
-function drawHitboxes(
+/** Draw unified hitboxes (barcode + OCR coconut matches) onto the canvas. */
+function drawUnifiedHitboxes(
   ctx: CanvasRenderingContext2D,
   dw: number,
   dh: number,
@@ -96,9 +94,10 @@ function drawHitboxes(
   const chipPadY = 2
   const chipRadius = 3
 
-  for (const [, entry] of hitboxMap) {
+  for (const [key, entry] of hitboxMap) {
     const { x, y, w, h, status, name } = entry
-    const color = HITBOX_COLORS[status] ?? '#ef4444'
+    const isOcr = key.startsWith('ocr:')
+    const color = isOcr ? HITBOX_COLORS.coconut_ocr : (HITBOX_COLORS[status] ?? '#ef4444')
 
     // Draw rounded rect border
     ctx.strokeStyle = color
@@ -119,10 +118,12 @@ function drawHitboxes(
     ctx.closePath()
     ctx.stroke()
 
-    // Draw text label chip above the bounding box
-    const label = name
-      ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
-      : STATUS_LABELS[status] ?? status.toUpperCase()
+    // Label chip above the bounding box
+    const label = isOcr
+      ? (name && name.length > 20 ? name.slice(0, 19) + '\u2026' : name ?? 'COCONUT')
+      : (name
+          ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
+          : STATUS_LABELS[status] ?? status.toUpperCase())
 
     ctx.font = `bold ${chipFontSize}px sans-serif`
     const textWidth = ctx.measureText(label).width
@@ -154,78 +155,6 @@ function drawHitboxes(
   }
 }
 
-/** Draw OCR hitboxes: subtle green for all words, bold red for coconut matches. */
-function drawOcrHitboxes(
-  ctx: CanvasRenderingContext2D,
-  dw: number,
-  dh: number,
-  hitboxMap: Map<string, HitboxEntry>,
-) {
-  ctx.clearRect(0, 0, dw, dh)
-
-  const chipFontSize = 10
-  const chipPadX = 3
-  const chipPadY = 1
-  const chipRadius = 3
-
-  for (const [, entry] of hitboxMap) {
-    const { x, y, w, h, status, name } = entry
-    const isCoconut = status === 'coconut'
-
-    // Draw border
-    ctx.strokeStyle = isCoconut ? '#ef4444' : 'rgba(74, 222, 128, 0.6)'  // red vs subtle green
-    ctx.lineWidth = isCoconut ? 3 : 1.5
-    ctx.lineJoin = 'round'
-
-    const r = isCoconut ? 6 : 3
-    ctx.beginPath()
-    ctx.moveTo(x + r, y)
-    ctx.lineTo(x + w - r, y)
-    ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-    ctx.lineTo(x + w, y + h - r)
-    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-    ctx.lineTo(x + r, y + h)
-    ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-    ctx.lineTo(x, y + r)
-    ctx.quadraticCurveTo(x, y, x + r, y)
-    ctx.closePath()
-    ctx.stroke()
-
-    // Label chip — always for coconut, small for others
-    const label = name
-      ? (name.length > 20 ? name.slice(0, 19) + '\u2026' : name)
-      : ''
-    if (!label) continue
-
-    ctx.font = `${isCoconut ? 'bold ' : ''}${chipFontSize}px sans-serif`
-    const textWidth = ctx.measureText(label).width
-    const chipW = textWidth + chipPadX * 2
-    const chipH = chipFontSize + chipPadY * 2
-    const chipX = x
-    const chipY = y - chipH - 1
-
-    // Chip background
-    ctx.fillStyle = isCoconut ? '#ef4444' : 'rgba(0, 0, 0, 0.5)'
-    ctx.beginPath()
-    ctx.moveTo(chipX + chipRadius, chipY)
-    ctx.lineTo(chipX + chipW - chipRadius, chipY)
-    ctx.quadraticCurveTo(chipX + chipW, chipY, chipX + chipW, chipY + chipRadius)
-    ctx.lineTo(chipX + chipW, chipY + chipH - chipRadius)
-    ctx.quadraticCurveTo(chipX + chipW, chipY + chipH, chipX + chipW - chipRadius, chipY + chipH)
-    ctx.lineTo(chipX + chipRadius, chipY + chipH)
-    ctx.quadraticCurveTo(chipX, chipY + chipH, chipX, chipY + chipH - chipRadius)
-    ctx.lineTo(chipX, chipY + chipRadius)
-    ctx.quadraticCurveTo(chipX, chipY, chipX + chipRadius, chipY)
-    ctx.closePath()
-    ctx.fill()
-
-    // Chip text
-    ctx.fillStyle = '#ffffff'
-    ctx.textBaseline = 'top'
-    ctx.fillText(label, chipX + chipPadX, chipY + chipPadY)
-  }
-}
-
 export default function BarcodeScanner() {
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -233,7 +162,6 @@ export default function BarcodeScanner() {
   const streamRef = useRef<MediaStream | null>(null)
   const inFlightRef = useRef(new Set<string>())
   const hitboxMapRef = useRef(new Map<string, HitboxEntry>())
-  const viewfinderModeRef = useRef<ViewfinderMode>('barcode')
   const [state, setState] = useState<ScanState>({ status: 'idle' })
   const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
   const [ocrDebug, setOcrDebug] = useState<{ frames: number; words: number; coconut: number }>({ frames: 0, words: 0, coconut: 0 })
@@ -278,12 +206,6 @@ export default function BarcodeScanner() {
     (state.status === 'processing' && state.source === 'viewfinder') ||
     (state.status === 'error' && state.inViewfinder)
 
-  const currentMode =
-    (state.status === 'viewfinder' ? state.mode :
-    state.status === 'processing' ? state.mode :
-    state.status === 'error' && state.mode ? state.mode :
-    viewfinderModeRef.current)
-
   // Attach stream to video element once the viewfinder mounts
   useEffect(() => {
     const video = videoRef.current
@@ -306,12 +228,17 @@ export default function BarcodeScanner() {
     }
   }, [isViewfinderOpen])
 
-  // ── Barcode detection loop ───────────────────────────────────
+  // ── Unified detection loop (barcode + OCR) ─────────────────
 
   useEffect(() => {
-    if (!isViewfinderOpen || currentMode !== 'barcode') return
+    if (!isViewfinderOpen) return
 
     hitboxMapRef.current.clear()
+    setOcrDebug({ frames: 0, words: 0, coconut: 0 })
+    let ocrBusy = false
+    let frameCount = 0
+
+    initOcr() // ensure worker is starting (idempotent)
 
     const id = setInterval(async () => {
       const video = videoRef.current
@@ -331,16 +258,25 @@ export default function BarcodeScanner() {
       const now = Date.now()
       const transform = videoCoverTransform(video)
 
-      let detections: { rawValue: string; boundingBox: DOMRectReadOnly }[]
-      try {
-        detections = await detectBarcodesWithBounds(video)
-      } catch {
-        detections = []
-      }
+      // Run both detections in parallel
+      const barcodePromise = detectBarcodesWithBounds(video).catch(() => [] as { rawValue: string; boundingBox: DOMRectReadOnly }[])
 
+      const ocrPromise = ocrBusy
+        ? Promise.resolve(null)
+        : (async () => {
+            ocrBusy = true
+            try {
+              return await recognizeWords(video)
+            } finally {
+              ocrBusy = false
+            }
+          })()
+
+      const [detections, ocrHits] = await Promise.all([barcodePromise, ocrPromise])
+
+      // ── Process barcode results ──
       if (detections.length > 0 && transform) {
         const { scale, offsetX, offsetY } = transform
-
         const skus = detections.map((d) => d.rawValue)
         const cached = await getStatuses(skus)
 
@@ -376,112 +312,57 @@ export default function BarcodeScanner() {
         }
       }
 
+      // ── Process OCR results (coconut matches only) ──
+      for (const key of hitboxMapRef.current.keys()) {
+        if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
+      }
+
+      if (ocrHits && ocrHits.length > 0 && transform) {
+        const { scale, offsetX, offsetY } = transform
+        frameCount++
+        const coconutHits = ocrHits.filter(h => h.isCoconut)
+        for (let i = 0; i < coconutHits.length; i++) {
+          const hit = coconutHits[i]
+          const x = hit.x * scale + offsetX - HITBOX_PADDING
+          const y = hit.y * scale + offsetY - HITBOX_PADDING
+          const w = hit.w * scale + HITBOX_PADDING * 2
+          const h = hit.h * scale + HITBOX_PADDING * 2
+
+          hitboxMapRef.current.set(`ocr:${i}`, {
+            x, y, w, h,
+            status: 'coconut',
+            name: hit.text,
+            lastSeenAt: now,
+          })
+        }
+        setOcrDebug({ frames: frameCount, words: ocrHits.length, coconut: coconutHits.length })
+      } else if (ocrHits !== null) {
+        frameCount++
+        setOcrDebug({ frames: frameCount, words: 0, coconut: 0 })
+      }
+
+      // Self-heal OCR worker if it crashed
+      if (ocrHits === null && getOcrReadyState() === 'loading') {
+        initOcr()
+      }
+
       // Evict stale entries
-      for (const [sku, entry] of hitboxMapRef.current) {
+      for (const [key, entry] of hitboxMapRef.current) {
         if (now - entry.lastSeenAt > HITBOX_RETAIN_MS) {
-          hitboxMapRef.current.delete(sku)
+          hitboxMapRef.current.delete(key)
         }
       }
 
-      drawHitboxes(ctx, dw, dh, hitboxMapRef.current)
+      drawUnifiedHitboxes(ctx, dw, dh, hitboxMapRef.current)
     }, 1000)
 
     return () => clearInterval(id)
-  }, [isViewfinderOpen, currentMode])
-
-  // ── OCR detection loop ───────────────────────────────────────
-
-  useEffect(() => {
-    if (!isViewfinderOpen || currentMode !== 'ocr') return
-
-    hitboxMapRef.current.clear()
-    setOcrDebug({ frames: 0, words: 0, coconut: 0 })
-    let cancelled = false
-    let frameCount = 0
-
-    const loop = async () => {
-      while (!cancelled) {
-        const video = videoRef.current
-        const canvas = canvasRef.current
-        if (!video || !canvas || video.readyState < video.HAVE_CURRENT_DATA) {
-          await new Promise((r) => setTimeout(r, 200))
-          continue
-        }
-
-        const dw = video.clientWidth
-        const dh = video.clientHeight
-        if (canvas.width !== dw || canvas.height !== dh) {
-          canvas.width = dw
-          canvas.height = dh
-        }
-
-        const ctx = canvas.getContext('2d')
-        if (!ctx) break
-
-        const now = Date.now()
-        const transform = videoCoverTransform(video)
-
-        const hits = await recognizeWords(video)
-        frameCount++
-
-        // Clear old OCR entries
-        for (const key of hitboxMapRef.current.keys()) {
-          if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
-        }
-
-        let wordCount = 0
-        let coconutCount = 0
-
-        if (hits && hits.length > 0 && transform) {
-          const { scale, offsetX, offsetY } = transform
-          wordCount = hits.length
-          coconutCount = hits.filter(h => h.isCoconut).length
-
-          for (let i = 0; i < hits.length; i++) {
-            const hit = hits[i]
-            const pad = hit.isCoconut ? HITBOX_PADDING : 4
-            const x = hit.x * scale + offsetX - pad
-            const y = hit.y * scale + offsetY - pad
-            const w = hit.w * scale + pad * 2
-            const h = hit.h * scale + pad * 2
-
-            hitboxMapRef.current.set(`ocr:${i}`, {
-              x, y, w, h,
-              status: hit.isCoconut ? 'coconut' : 'clean',
-              name: hit.text,
-              lastSeenAt: now,
-            })
-          }
-        }
-
-        setOcrDebug({ frames: frameCount, words: wordCount, coconut: coconutCount })
-
-        // Evict stale entries
-        for (const [key, entry] of hitboxMapRef.current) {
-          if (now - entry.lastSeenAt > HITBOX_RETAIN_MS) {
-            hitboxMapRef.current.delete(key)
-          }
-        }
-
-        drawOcrHitboxes(ctx, dw, dh, hitboxMapRef.current)
-
-        // Wait before next frame to avoid pile-up
-        await new Promise((r) => setTimeout(r, 200))
-      }
-    }
-
-    loop()
-    return () => { cancelled = true }
-  }, [isViewfinderOpen, currentMode])
+  }, [isViewfinderOpen])
 
   // ── Open / close viewfinder ──────────────────────────────────
 
-  const openViewfinder = useCallback(async (mode: ViewfinderMode) => {
-    viewfinderModeRef.current = mode
-
-    if (mode === 'ocr') {
-      initOcr() // ensure worker is starting (idempotent)
-    }
+  const openViewfinder = useCallback(async () => {
+    initOcr() // ensure worker is starting (idempotent)
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -492,7 +373,7 @@ export default function BarcodeScanner() {
         },
       })
       streamRef.current = stream
-      setState({ status: 'viewfinder', mode })
+      setState({ status: 'viewfinder' })
     } catch {
       setState({
         status: 'error',
@@ -508,14 +389,12 @@ export default function BarcodeScanner() {
   }, [stopStream])
 
   const handleTap = useCallback(async () => {
-    // Tap-to-scan only in barcode mode
-    if (currentMode !== 'barcode') return
     const canScan =
       state.status === 'viewfinder' ||
       (state.status === 'error' && state.inViewfinder)
     if (!videoRef.current || !canScan) return
 
-    setState({ status: 'processing', source: 'viewfinder', mode: 'barcode' })
+    setState({ status: 'processing', source: 'viewfinder' })
     try {
       const sku = await detectBarcodeBurst(videoRef.current)
       if (!sku) {
@@ -523,7 +402,6 @@ export default function BarcodeScanner() {
           status: 'error',
           message: 'No barcode found. Center the barcode and tap again.',
           inViewfinder: true,
-          mode: 'barcode',
         })
         return
       }
@@ -533,20 +411,19 @@ export default function BarcodeScanner() {
         status: 'error',
         message: 'Could not read barcode. Try again.',
         inViewfinder: true,
-        mode: 'barcode',
       })
     }
-  }, [state.status, currentMode, handleSKU])
+  }, [state.status, handleSKU])
 
   // ── Shared ──────────────────────────────────────────────────
 
   const dismiss = useCallback(() => {
     if (state.status === 'error' && state.inViewfinder) {
-      setState({ status: 'viewfinder', mode: currentMode })
+      setState({ status: 'viewfinder' })
     } else {
       setState({ status: 'idle' })
     }
-  }, [state, currentMode])
+  }, [state])
 
   const busy = state.status === 'processing'
 
@@ -580,15 +457,13 @@ export default function BarcodeScanner() {
           {state.status === 'viewfinder' && (
             <div className="absolute bottom-8 left-0 right-0 text-center">
               <span className="rounded-full bg-black/50 px-4 py-2 text-sm font-medium text-white backdrop-blur-sm">
-                {currentMode === 'barcode'
-                  ? 'Tap to scan barcode'
-                  : 'Point at ingredient list'}
+                Tap barcode to look up product
               </span>
             </div>
           )}
 
-          {/* OCR debug status pill (dev only) */}
-          {import.meta.env.DEV && currentMode === 'ocr' && isViewfinderOpen && (
+          {/* Debug status pill (dev only) */}
+          {import.meta.env.DEV && isViewfinderOpen && (
             <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
               <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady}</div>
               <div>frames: {ocrDebug.frames}</div>
@@ -599,7 +474,7 @@ export default function BarcodeScanner() {
             </div>
           )}
 
-          {state.status === 'processing' && currentMode === 'barcode' && (
+          {state.status === 'processing' && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/30">
               <div className="rounded-lg bg-white px-6 py-4 text-sm font-medium text-gray-700 shadow-lg">
                 Reading barcode...
@@ -632,59 +507,29 @@ export default function BarcodeScanner() {
         </div>
       )}
 
-      {/* Sticky footer — two buttons */}
+      {/* Sticky footer */}
       <div className="fixed bottom-0 left-1/2 z-40 w-full max-w-lg -translate-x-1/2 p-3">
-        <div className="flex gap-2">
-          {/* Pink: barcode viewfinder */}
-          <button
-            onClick={() => openViewfinder('barcode')}
-            disabled={busy}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors disabled:opacity-60"
-            style={{ backgroundColor: '#f15c99' }}
+        <button
+          onClick={openViewfinder}
+          disabled={busy}
+          className="flex w-full items-center justify-center gap-2 rounded-xl px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors disabled:opacity-60"
+          style={{ backgroundColor: '#f51c99' }}
+        >
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className="h-5 w-5"
           >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="h-5 w-5"
-            >
-              <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
-              <circle cx="12" cy="13" r="4" />
-            </svg>
-            bARcode Glance
-          </button>
-
-          {/* Blue: OCR viewfinder */}
-          <button
-            onClick={() => openViewfinder('ocr')}
-            disabled={busy || ocrReady === 'error'}
-            className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-3 py-3.5 text-sm font-semibold text-white shadow-lg transition-colors hover:bg-blue-700 active:bg-blue-800 disabled:opacity-60"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth={2}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              className="h-5 w-5"
-            >
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-              <polyline points="10 9 9 9 8 9" />
-            </svg>
-            {ocrReady === 'loading' ? 'Loading OCR...' :
-             ocrReady === 'error' ? 'OCR Error' :
-             'Ingredient OCR'}
-          </button>
-        </div>
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z" />
+            <circle cx="12" cy="13" r="4" />
+          </svg>
+          cocoNot vision
+        </button>
       </div>
     </>
   )
