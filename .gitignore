@@ -1,0 +1,6 @@
+node_modules/
+frontend/dist/
+backend/coconutfree
+*.exe
+.env
+.DS_Store

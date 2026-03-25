@@ -1,0 +1,193 @@
+# CoconutFree - Dev Log
+
+## 2026-03-22 — Project Kickoff
+
+### The Problem
+Girlfriend has a severe coconut allergy. Many frozen dairy treats (ice cream, gelato, sorbet) contain coconut milk/oil as a cheaper dairy substitute. Need a tool to track which products are safe.
+
+### Core Requirements Discussed
+1. **Product database** — frozen dairy treats available in Seattle, enriched from grocery websites + brand listings
+2. **Ingredients tracking by SKU** — normalize products, track ingredient changes over time
+3. **Safe / Not Safe UI** — visually clear, easy to parse at a glance
+4. **Temporal safety model** — "no coconut as of DATE", always encourage verifying the actual label
+5. **Tech stack** — React frontend (mobile-first web app) + lightweight backend serving static skeleton + product DB
+6. **Search** — SKU lookup, fuzzy brand/item name matching
+7. **Stretch: barcode scanning** — browser camera APIs for scanning barcodes in-store
+8. **Stretch: visual product matching** — camera -> draw colored boxes on recognized products (blue = "likely safe, check it")
+9. **User flagging** — report inaccuracies, user flags override scraped data (especially true positives for coconut presence)
+10. **Change tracking** — index of products that recently changed safe/unsafe status
+11. **Data sourcing** — web scraping grocery sites, brand ingredient lists, Open Food Facts, etc.
+
+### Decisions
+- Planning phase — designing architecture before writing code.
+
+## 2026-03-23 — Session 2: Architecture Finalized + Scaffolding
+
+### Tech Stack Finalized
+- **Backend:** Go (chi router + pgx)
+- **Frontend:** React (Vite + TypeScript + TailwindCSS)
+- **Database:** PostgreSQL 16 (in-container)
+- **Deployment:** Docker Compose, self-hosted
+
+### Critical Mental Model Correction
+User correctly pushed back on "SAFE / NOT SAFE" terminology. Two categories:
+- **CONTAINS COCONUT** — high confidence dangerous, skip it
+- **POSSIBLY CLEAN (as of DATE)** — no coconut found in our data, but ALWAYS check the label
+
+This is a filtering tool for eliminating the dangerous, NOT a source of truth for what's safe.
+
+### Data Source Strategy
+- Open Food Facts API + web scrapers as separate `ingredient_sources` rows
+- User flags for coconut presence always override scraped data (safety-critical)
+- One positive from any source = contains coconut, full stop
+
+### Phase 1: Scaffolding — Complete
+All scaffolding built and compiling:
+
+**Backend (Go):**
+- `backend/main.go` — server entry, runs migrations, serves API + static frontend
+- `backend/internal/models/` — Product, IngredientSource, UserFlag, StatusChange types
+- `backend/internal/db/` — pgxpool connection, all queries (list, detail, barcode lookup, fuzzy search, flagging, reclassification log)
+- `backend/internal/api/` — chi router, all REST handlers
+- `backend/internal/coconut/` — coconut keyword detection (coconut, cocos nucifera, copra)
+- `backend/migrations/001_initial` — full schema with pg_trgm indexes
+
+**Frontend (React + Vite + Tailwind):**
+- Home/Search page — debounced search, filter toggles (all / possibly clean / contains coconut)
+- Product detail page — ingredient sources, status history, flag submission
+- Reclassified page — recently changed products (watch list)
+- Components: StatusBadge (red/amber/gray), ProductCard, Nav, Disclaimer banner
+
+**Infrastructure:**
+- `docker-compose.yml` — Go app + Postgres 16, healthcheck
+- `Dockerfile` — multi-stage (build frontend, build Go, alpine runtime)
+- API proxied through Vite dev server for local development
+
+### Next Steps (Phase 2)
+- Open Food Facts API client to ingest frozen dessert products
+- Coconut detection pipeline to populate the database
+- Web scraper framework for grocery sites
+
+## 2026-03-23 — Session 3: Open Food Facts API Research
+
+### API Research Complete
+Thoroughly tested the Open Food Facts API with live requests. Key findings documented below for building the Go client.
+
+**Two search approaches:**
+1. V2 API (`/api/v2/search`) — structured tag-based filtering, preferred for category queries
+2. V1 API (`/cgi/search.pl`) — supports full-text search, useful for keyword matching
+
+**Relevant category tags and product counts (US only):**
+- `categories_tags=en:ice-creams-and-sorbets` — 1,627 US products
+- `categories_tags_en=ice-cream` + `countries_tags_en=united-states` — 1,437 products
+- `categories_tags_en=frozen-desserts` + `countries_tags_en=united-states` — 11,240 products
+- `categories_tags_en=sorbet` — 2,200 globally
+- `categories_tags_en=gelato` — 1 globally (very sparse)
+
+**Rate limits are strict:**
+- Search: 10 req/min
+- Read: 100 req/min
+- Facets: 2 req/min
+
+**Max page_size is 100** (server caps regardless of what you request).
+
+**Fields we need:** code, product_name, brands, ingredients_text, categories_tags_en, allergens_tags, traces_tags, image_url, image_front_url, stores_tags, countries_tags_en, last_modified_t
+
+**Strategy decision:** Use `en:ice-creams-and-sorbets` as the broadest relevant category with US country filter. Paginate through all ~1,600 products at 100/page = 16 requests. At 10 req/min that's under 2 minutes for a full sync.
+
+## 2026-03-23 — Session 4: Open Food Facts Self-Hosting Research
+
+### Goal
+Research self-hosting the Open Food Facts database on a NAS to avoid API rate limits.
+
+### Database Dump Formats Available
+All exports are generated **nightly** from the live database.
+
+| Format | URL | Compressed | Uncompressed | Notes |
+|--------|-----|-----------|--------------|-------|
+| MongoDB dump | `https://static.openfoodfacts.org/data/openfoodfacts-mongodbdump.gz` | ~6 GB | ~39 GB | Native format, direct restore |
+| JSONL | `https://static.openfoodfacts.org/data/openfoodfacts-products.jsonl.gz` | ~7 GB | ~43 GB | One JSON object per line |
+| CSV (tab-separated) | via advanced search or data page | ~0.9 GB | ~9 GB | UTF-8, tab-delimited |
+| Parquet | `https://huggingface.co/datasets/openfoodfacts/product-database` | ~1-2 GB | N/A (columnar) | Simplified/filtered, 4.4M rows, 150+ columns |
+| RDF | `https://world.openfoodfacts.org/data/en.openfoodfacts.org.products.rdf.gz` | ? | ? | Experimental, not maintained |
+
+Delta exports (incremental changes) available for the last 14 days at `https://static.openfoodfacts.org/data/delta/index.txt`.
+
+### Self-Hosting Options
+
+**Option A: Full openfoodfacts-server (Docker Compose)**
+- Repo: `github.com/openfoodfacts/openfoodfacts-server`
+- Services: Perl backend, MongoDB, PostgreSQL (via openfoodfacts-query), Memcached, Nginx
+- Dev setup: `make dev` builds containers + loads ~100 sample products
+- Production-like: `docker-compose.yml;docker/prod.yml;docker/mongodb.yml`
+- Resource-heavy: recommends 6+ CPU cores, 8 GB RAM for Docker alone, 8 GB MongoDB cache
+- This is the entire OFF website + API — massive overkill for our use case
+
+**Option B: search-a-licious (Lightweight search API)**
+- Repo: `github.com/openfoodfacts/search-a-licious`
+- Python + TypeScript, Elasticsearch-backed
+- Has its own docker-compose.yml
+- Designed as a pluggable search service for large collections
+- More appropriate for "I just want to search OFF data" use cases
+- Still requires Elasticsearch (RAM-hungry)
+
+**Option C: DuckDB + Parquet (Lightest weight)**
+- Download `food.parquet` from Hugging Face (~1-2 GB)
+- Query directly with DuckDB — no server process needed
+- Filter by country (`countries_tags`), category (`categories_tags`), ingredients, allergens
+- Can extract a US-only frozen desserts subset in a single SQL query
+- Update: re-download parquet nightly (or weekly)
+- Example: `SELECT * FROM 'food.parquet' WHERE list_contains(countries_tags, 'en:united-states') AND list_contains(categories_tags, 'en:ice-creams-and-sorbets')`
+
+**Option D: MongoDB dump + custom API**
+- Download the 6 GB MongoDB dump nightly
+- Restore into a local MongoDB instance
+- Write a thin API layer (Go) that queries MongoDB directly
+- Most flexible but requires maintaining MongoDB + custom code
+
+### Subset Strategies
+- **API filtering at query time:** All formats support filtering by `countries_tags` and `categories_tags` after loading
+- **No pre-filtered country/category dumps** exist — you always download the full dump and filter locally
+- **Parquet + DuckDB** is ideal for extracting subsets without loading the full dataset into memory (columnar format means you only read columns you need)
+- **CSV** can be filtered with standard tools (awk, pandas) but the full file is ~9 GB uncompressed
+
+### Recommendation for CoconutFree
+Given our use case (only ~1,600 US frozen dessert products), the full self-hosting approach is overkill. Best options in order:
+
+1. **Parquet + DuckDB** — Download the parquet file weekly, extract our subset into PostgreSQL. Tiny footprint, no running services, trivially scriptable. The parquet file acts as our "upstream sync source."
+2. **Direct API with rate limiting** — For ~1,600 products at 100/page, a full sync is only 16 requests (~2 min). Do this daily or weekly. Simplest approach, no local OFF infrastructure needed.
+3. **MongoDB dump** — Only if we outgrow the API approach and need access to the full dataset for some reason.
+
+The full openfoodfacts-server Docker setup is not worth it for us — it's designed for running the entire OFF website, not for data consumers.
+
+## 2026-03-24 — Phase 2: Parquet Ingestion Pipeline Built
+
+### Decision
+User chose **Parquet + DuckDB** approach. User will self-host the parquet file on their NAS.
+
+### What Was Built
+`backend/internal/ingest/off.go` — full ingestion pipeline:
+
+1. **Downloads** the OFF `food.parquet` from Hugging Face (~2 GB) to a persistent Docker volume
+2. **Queries with DuckDB** (in-process via `go-duckdb`) — filters to US frozen desserts across 10 category tags:
+   - `en:ice-creams-and-sorbets`, `en:frozen-desserts`, `en:ice-creams`, `en:sorbets`, `en:gelati`, `en:frozen-yogurts`, `en:ice-cream-bars`, `en:ice-cream-sandwiches`, `en:ice-cream-tubs`, `en:popsicles`
+3. **Runs coconut detection** on each product's `ingredients_text`
+4. **Upserts into Postgres** — inserts new products, updates existing, logs status changes to `status_changelog`
+5. **Respects user flags** — never overwrites a user's `found_coconut` flag with scraped data
+
+### CLI Usage
+```
+./coconutfree ingest          # run ingestion
+./coconutfree                 # start the web server (default)
+```
+
+### Docker Usage
+```
+docker compose run --rm ingest    # one-off ingestion run
+docker compose up                 # start the web app
+```
+
+`offdata` Docker volume persists the parquet file between runs (skips re-download if <24h old).
+
+### Category Classification
+Products auto-classified based on OFF category tags: ice_cream, sorbet, gelato, frozen_yogurt, novelty (bars/sandwiches/popsicles), other.
