@@ -13,6 +13,12 @@ export interface OcrHit {
 
 export type OcrReadyState = 'loading' | 'ready' | 'error'
 
+export interface OcrResult {
+  hits: OcrHit[]
+  durationMs: number
+  tileCount: number
+}
+
 export interface Tile {
   canvas: OffscreenCanvas
   offsetX: number
@@ -21,7 +27,7 @@ export interface Tile {
 
 // ── Constants ─────────────────────────────────────────────────
 
-export const POOL_SIZE = 2
+export const POOL_SIZE = 4
 export const TILE_SIZE = 1024
 export const TILE_OVERLAP = 80
 
@@ -326,8 +332,10 @@ export function flattenWords(blocks: Tesseract.Block[] | null | undefined): Tess
  */
 export async function recognizeWords(
   video: HTMLVideoElement,
-): Promise<OcrHit[] | null> {
+): Promise<OcrResult | null> {
   if (workers.length === 0 || readyState !== 'ready') return null
+
+  const t0 = performance.now()
 
   const vw = video.videoWidth
   const vh = video.videoHeight
@@ -376,6 +384,8 @@ export async function recognizeWords(
 
   await Promise.all(workers.map(w => work(w)))
 
+  const durationMs = Math.round(performance.now() - t0)
+
   // If all workers crashed, tear down and recreate
   if (crashCount >= tiles.length) {
     terminateOcr()
@@ -383,10 +393,10 @@ export async function recognizeWords(
   }
 
   const allHits = tileResults.flat()
-  if (allHits.length === 0) return null
+  if (allHits.length === 0) return { hits: [], durationMs, tileCount: tiles.length }
 
   const deduplicated = deduplicateHits(allHits)
-  return deduplicated.length > 0 ? deduplicated : null
+  return { hits: deduplicated, durationMs, tileCount: tiles.length }
 }
 
 /**

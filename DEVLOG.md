@@ -708,3 +708,32 @@ Instead of sending one full frame to a single Tesseract worker, the new pipeline
 - `frontend/src/components/BarcodeScanner.tsx` — camera resolution 1920×1080 → 4032×3024
 - `frontend/src/components/hitbox.ts` — thicker OCR border, outward growth
 - `frontend/src/api/__tests__/ocr.test.ts` — added deduplicateHits unit tests
+
+## 2026-03-25 — OCR Performance Tuning & Instrumentation
+
+### Problem
+OCR results were slow and flaky — 2s polling with only 2 workers meant long gaps between frames and lots of dropped frames when OCR was busy.
+
+### Changes
+
+**Worker pool: 2 → 4 workers**
+- More Tesseract workers running in parallel for faster per-frame processing
+- Work-stealing pattern means all 4 workers share tiles from one frame
+
+**Polling rate: 2000ms → 800ms**
+- More responsive detection loop; frames are still dropped when OCR is busy, but with faster per-frame OCR from 4 workers, fewer frames should be skipped
+
+**Timing instrumentation**
+- `recognizeWords()` now returns `OcrResult { hits, durationMs, tileCount }` instead of bare `OcrHit[]`
+- `performance.now()` wraps the full capture-tile-recognize pipeline
+
+**Enhanced debug pill**
+- Shows: OCR status, frames processed, frames skipped (busy), tile count, processing time (ms), word count, coconut hits
+- Frame skip counter tracks how many times the polling interval fired while OCR was still busy — confirms there's no hidden queue, just drops
+
+### Discussion: text region pre-detection
+User floated the idea of a cheap pre-pass to isolate text-like regions before running full OCR — crop to text blocks, feed those smaller regions to workers. Could dramatically reduce the pixel area Tesseract has to process. Deferred for now pending results from the 4-worker + 800ms tuning.
+
+### Files Changed
+- `frontend/src/api/ocr.ts` — POOL_SIZE 2→4, OcrResult type, timing
+- `frontend/src/components/BarcodeScanner.tsx` — 800ms interval, skip tracking, enhanced debug pill

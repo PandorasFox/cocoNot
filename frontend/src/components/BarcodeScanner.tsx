@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound } from '../api/cache'
-import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
+import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type OcrResult } from '../api/ocr'
 import {
   drawUnifiedHitboxes, videoCoverTransform,
   HITBOX_RETAIN_MS, HITBOX_PADDING,
@@ -25,7 +25,10 @@ export default function BarcodeScanner() {
   const hitboxMapRef = useRef(new Map<string, HitboxEntry>())
   const [state, setState] = useState<ScanState>({ status: 'idle' })
   const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
-  const [ocrDebug, setOcrDebug] = useState<{ frames: number; words: number; coconut: number }>({ frames: 0, words: 0, coconut: 0 })
+  const [ocrDebug, setOcrDebug] = useState<{
+    frames: number; words: number; coconut: number
+    lastMs: number; skipped: number; tiles: number
+  }>({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0, tiles: 0 })
 
   // Subscribe to OCR readiness changes
   useEffect(() => onOcrReadyChange(setOcrReady), [])
@@ -95,9 +98,10 @@ export default function BarcodeScanner() {
     if (!isViewfinderOpen) return
 
     hitboxMapRef.current.clear()
-    setOcrDebug({ frames: 0, words: 0, coconut: 0 })
+    setOcrDebug({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0, tiles: 0 })
     let ocrBusy = false
     let frameCount = 0
+    let skippedCount = 0
 
     initOcr() // ensure worker is starting (idempotent)
 
@@ -122,8 +126,8 @@ export default function BarcodeScanner() {
       // Run both detections in parallel
       const barcodePromise = detectBarcodesWithBounds(video).catch(() => [] as { rawValue: string; boundingBox: DOMRectReadOnly }[])
 
-      const ocrPromise = ocrBusy
-        ? Promise.resolve(null)
+      const ocrPromise: Promise<OcrResult | null> = ocrBusy
+        ? ((() => { skippedCount++; return Promise.resolve(null) })())
         : (async () => {
             ocrBusy = true
             try {
@@ -133,7 +137,7 @@ export default function BarcodeScanner() {
             }
           })()
 
-      const [detections, ocrHits] = await Promise.all([barcodePromise, ocrPromise])
+      const [detections, ocrResult] = await Promise.all([barcodePromise, ocrPromise])
 
       // ── Process barcode results ──
       if (detections.length > 0 && transform) {
@@ -177,8 +181,9 @@ export default function BarcodeScanner() {
       // Don't wipe old OCR entries — let stale eviction handle it.
       // Position-bucketed keys so nearby hits across frames share an entry,
       // giving any lucky frame's coconut detection a full HITBOX_RETAIN_MS to live.
-      if (ocrHits !== null) {
+      if (ocrResult !== null) {
         frameCount++
+        const { hits: ocrHits, durationMs, tileCount } = ocrResult
         if (ocrHits.length > 0 && transform) {
           const { scale, offsetX, offsetY } = transform
           const coconutHits = ocrHits.filter(h => h.isCoconut)
@@ -204,11 +209,14 @@ export default function BarcodeScanner() {
         for (const k of hitboxMapRef.current.keys()) {
           if (k.startsWith('ocr:')) liveCoconut++
         }
-        setOcrDebug({ frames: frameCount, words: ocrHits.length, coconut: liveCoconut })
+        setOcrDebug({
+          frames: frameCount, words: ocrHits.length, coconut: liveCoconut,
+          lastMs: durationMs, skipped: skippedCount, tiles: tileCount,
+        })
       }
 
       // Self-heal OCR worker if it crashed
-      if (ocrHits === null && getOcrReadyState() === 'loading') {
+      if (ocrResult === null && getOcrReadyState() === 'loading') {
         initOcr()
       }
 
@@ -220,7 +228,7 @@ export default function BarcodeScanner() {
       }
 
       drawUnifiedHitboxes(ctx, dw, dh, hitboxMapRef.current)
-    }, 2000)
+    }, 800)
 
     return () => clearInterval(id)
   }, [isViewfinderOpen])
@@ -332,7 +340,8 @@ export default function BarcodeScanner() {
           {isViewfinderOpen && (
             <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
               <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady}</div>
-              <div>frames: {ocrDebug.frames}</div>
+              <div>frames: {ocrDebug.frames} | skip: {ocrDebug.skipped}</div>
+              <div>tiles: {ocrDebug.tiles} | {ocrDebug.lastMs}ms</div>
               <div>words: {ocrDebug.words}</div>
               {ocrDebug.coconut > 0 && (
                 <div className="font-bold text-red-400">COCONUT: {ocrDebug.coconut}</div>
