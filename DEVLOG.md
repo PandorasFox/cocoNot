@@ -344,3 +344,23 @@ Added `.github/workflows/docker-publish.yml` — GitHub Actions workflow to auto
 - **Caching:** GitHub Actions cache (`type=gha`) for Docker layers — speeds up subsequent builds
 - **Auth:** uses `GITHUB_TOKEN` (no secrets to configure)
 - **Actions used:** checkout@v4, setup-buildx-action@v3, login-action@v3, metadata-action@v5, build-push-action@v6
+
+## 2026-03-25 — Session 9: Single-Container Deploy
+
+### What Changed
+Embedded PostgreSQL 15 into the app container so deployment is a single `docker run` instead of requiring docker-compose with a separate db service.
+
+### Files
+- **`docker-entrypoint.sh`** (new) — startup script that:
+  - `chown -R` the PGDATA directory (handles volume ownership)
+  - Runs `initdb` on first boot, writes a clean `pg_hba.conf` (peer for local socket, scram-sha-256 for TCP)
+  - Starts PostgreSQL via `pg_ctl`, waits for readiness
+  - Creates the `coconutfree` role + database if missing
+  - `exec "$@"` to hand off to the app binary
+- **`Dockerfile`** — runtime stage now installs `postgresql-15`, copies entrypoint, adds PG bin to PATH, sets `DATABASE_URL` default, uses `ENTRYPOINT` + `CMD` pattern
+- **`docker-compose.yml`** — removed `db` service entirely, `app` and `ingest` mount `pgdata:/var/lib/postgresql/data` for persistence, `DATABASE_URL` uses localhost (set as image default)
+
+### Notes
+- Debian bookworm ships PG 15 (not 16). No PG16-specific features used, so this is fine.
+- Image is larger (~318 MB of PG + deps) but eliminates multi-container orchestration.
+- `docker run -p 8080:8080 -v pgdata:/var/lib/postgresql/data -v offdata:/data coconutfree-app` is now a valid single-command deploy.

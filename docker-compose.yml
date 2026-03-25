@@ -5,16 +5,13 @@ services:
       - "8080:8080"
     volumes:
       - offdata:/data
+      - pgdata:/var/lib/postgresql/data
     environment:
-      DATABASE_URL: postgres://coconutfree:coconutfree@db:5432/coconutfree?sslmode=disable
       PORT: "8080"
       FRONTEND_DIR: /app/static
       MIGRATIONS_DIR: file:///app/migrations
       DATA_DIR: /data
       INGEST_INTERVAL: "6h"
-    depends_on:
-      db:
-        condition: service_healthy
 
   # Run with: docker compose run --rm ingest
   # Won't start with `docker compose up app` — only runs when targeted directly
@@ -23,27 +20,10 @@ services:
     command: ["./coconutfree", "ingest"]
     volumes:
       - offdata:/data
+      - pgdata:/var/lib/postgresql/data
     environment:
-      DATABASE_URL: postgres://coconutfree:coconutfree@db:5432/coconutfree?sslmode=disable
       MIGRATIONS_DIR: file:///app/migrations
       DATA_DIR: /data
-    depends_on:
-      db:
-        condition: service_healthy
-
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: coconutfree
-      POSTGRES_PASSWORD: coconutfree
-      POSTGRES_DB: coconutfree
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U coconutfree"]
-      interval: 2s
-      timeout: 5s
-      retries: 10
 
 volumes:
   pgdata:
