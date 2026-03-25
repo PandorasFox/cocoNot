@@ -457,3 +457,56 @@ Three interconnected features for real-time barcode status overlay in the viewfi
 - Removed `StatusChange` interface, `getReclassified()`, and `history` field from frontend client
 - Removed "Status History" section from `ProductDetail.tsx`
 - Kept: `status_changelog` table + write path (audit trail)
+
+## 2026-03-25 — Session 14: Ingredient OCR Viewfinder
+
+### What Was Built
+Added a second viewfinder mode for OCR-based ingredient scanning using Tesseract.js. When barcode data isn't available, users can point their phone at the ingredient list and see real-time red hitboxes around coconut-related keywords.
+
+**1. `tesseract.js` dependency**
+- Tesseract.js v5 bundles its own WASM core + creates a Web Worker internally
+- ~4MB English trained data fetched from CDN on first load, then browser-cached
+
+**2. `frontend/src/api/ocr.ts` — OCR engine module**
+- Singleton Tesseract worker with pub/sub readiness state (`'loading' | 'ready' | 'error'`)
+- `initOcr()` — eagerly initialize worker (idempotent, called from splash screen)
+- `recognizeCoconutHits(video)` → `OcrHit[] | null` — full pipeline:
+  - Capture frame to OffscreenCanvas at native resolution
+  - Grayscale conversion in-place
+  - Otsu's method for adaptive binary threshold (handles varying lighting)
+  - Tesseract OCR on the preprocessed frame
+  - Keyword matching: `coconut`, `copra` (single word), `cocos nucifera` (two-word with merged bounding boxes)
+  - Returns hits in video-pixel coordinates
+- Crash recovery: if `worker.recognize()` throws, `terminateOcr()` resets the singleton. Next `initOcr()` recreates the worker.
+
+**3. `frontend/src/components/SplashScreen.tsx`**
+- Full-screen overlay at `z-[100]` showing 🚫🥥🚫 + "CocoNot" + loading status
+- Calls `initOcr()` on mount, subscribes to readiness changes
+- Dismisses on ready/error or after 15s safety timeout
+- Self-removes from DOM once dismissed
+
+**4. `frontend/src/components/BarcodeScanner.tsx` — dual-mode refactor**
+- New state machine with `ViewfinderMode = 'barcode' | 'ocr'` discriminant
+- **Removed all file picker code**: `inputRef`, `openFilePicker`, `handleFile`, hidden `<input>`, blue "Scan Barcode" button, file-picker error toast and processing overlay
+- Two detection loops branching on mode:
+  - **Barcode mode:** existing `setInterval(1000)` logic unchanged
+  - **OCR mode:** adaptive `while` loop with `setTimeout(200)` cooldown — no pile-up of work
+- Both modes write to the same `hitboxMapRef` and use the same `drawHitboxes()` function (extracted from inline code)
+- New button layout: `[Pink: bARcode Glance] [Blue: Ingredient OCR]`
+- OCR button subscribes to `onOcrReadyChange` for loading/ready/error states
+- Mode-aware hint text ("Tap to scan barcode" vs "Point at ingredient list")
+- Tap-to-scan only active in barcode mode
+
+**5. `frontend/src/api/barcode.ts` cleanup**
+- Removed unused `detectBarcode(file: File)` export
+
+**6. Fix: hitbox labels showing raw JSON blobs**
+- `cache.ts` now runs `extractText()` on product names at write time so IndexedDB stores clean text for label chips
+
+## 2026-03-25 — Session 15: Favicon
+
+### What Was Built
+- Combined Google Noto Emoji SVGs (coconut 🥥 + prohibition sign 🚫) into a single `favicon.svg`
+- Coconut layer renders underneath, prohibition sign overlays on top (transparent center shows coconut through)
+- Placed in `frontend/public/favicon.svg` (Vite copies to root on build)
+- Added `<link rel="icon" type="image/svg+xml" href="/favicon.svg" />` to `index.html`
