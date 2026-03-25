@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound, type CachedSKU } from '../api/cache'
-import { initOcr, recognizeCoconutHits, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
+import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
 
 type ViewfinderMode = 'barcode' | 'ocr'
 
@@ -154,6 +154,78 @@ function drawHitboxes(
   }
 }
 
+/** Draw OCR hitboxes: subtle green for all words, bold red for coconut matches. */
+function drawOcrHitboxes(
+  ctx: CanvasRenderingContext2D,
+  dw: number,
+  dh: number,
+  hitboxMap: Map<string, HitboxEntry>,
+) {
+  ctx.clearRect(0, 0, dw, dh)
+
+  const chipFontSize = 10
+  const chipPadX = 3
+  const chipPadY = 1
+  const chipRadius = 3
+
+  for (const [, entry] of hitboxMap) {
+    const { x, y, w, h, status, name } = entry
+    const isCoconut = status === 'coconut'
+
+    // Draw border
+    ctx.strokeStyle = isCoconut ? '#ef4444' : 'rgba(74, 222, 128, 0.6)'  // red vs subtle green
+    ctx.lineWidth = isCoconut ? 3 : 1.5
+    ctx.lineJoin = 'round'
+
+    const r = isCoconut ? 6 : 3
+    ctx.beginPath()
+    ctx.moveTo(x + r, y)
+    ctx.lineTo(x + w - r, y)
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+    ctx.lineTo(x + w, y + h - r)
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+    ctx.lineTo(x + r, y + h)
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+    ctx.lineTo(x, y + r)
+    ctx.quadraticCurveTo(x, y, x + r, y)
+    ctx.closePath()
+    ctx.stroke()
+
+    // Label chip — always for coconut, small for others
+    const label = name
+      ? (name.length > 20 ? name.slice(0, 19) + '\u2026' : name)
+      : ''
+    if (!label) continue
+
+    ctx.font = `${isCoconut ? 'bold ' : ''}${chipFontSize}px sans-serif`
+    const textWidth = ctx.measureText(label).width
+    const chipW = textWidth + chipPadX * 2
+    const chipH = chipFontSize + chipPadY * 2
+    const chipX = x
+    const chipY = y - chipH - 1
+
+    // Chip background
+    ctx.fillStyle = isCoconut ? '#ef4444' : 'rgba(0, 0, 0, 0.5)'
+    ctx.beginPath()
+    ctx.moveTo(chipX + chipRadius, chipY)
+    ctx.lineTo(chipX + chipW - chipRadius, chipY)
+    ctx.quadraticCurveTo(chipX + chipW, chipY, chipX + chipW, chipY + chipRadius)
+    ctx.lineTo(chipX + chipW, chipY + chipH - chipRadius)
+    ctx.quadraticCurveTo(chipX + chipW, chipY + chipH, chipX + chipW - chipRadius, chipY + chipH)
+    ctx.lineTo(chipX + chipRadius, chipY + chipH)
+    ctx.quadraticCurveTo(chipX, chipY + chipH, chipX, chipY + chipH - chipRadius)
+    ctx.lineTo(chipX, chipY + chipRadius)
+    ctx.quadraticCurveTo(chipX, chipY, chipX + chipRadius, chipY)
+    ctx.closePath()
+    ctx.fill()
+
+    // Chip text
+    ctx.fillStyle = '#ffffff'
+    ctx.textBaseline = 'top'
+    ctx.fillText(label, chipX + chipPadX, chipY + chipPadY)
+  }
+}
+
 export default function BarcodeScanner() {
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -164,6 +236,7 @@ export default function BarcodeScanner() {
   const viewfinderModeRef = useRef<ViewfinderMode>('barcode')
   const [state, setState] = useState<ScanState>({ status: 'idle' })
   const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
+  const [ocrDebug, setOcrDebug] = useState<{ frames: number; words: number; coconut: number }>({ frames: 0, words: 0, coconut: 0 })
 
   // Subscribe to OCR readiness changes
   useEffect(() => onOcrReadyChange(setOcrReady), [])
@@ -322,7 +395,9 @@ export default function BarcodeScanner() {
     if (!isViewfinderOpen || currentMode !== 'ocr') return
 
     hitboxMapRef.current.clear()
+    setOcrDebug({ frames: 0, words: 0, coconut: 0 })
     let cancelled = false
+    let frameCount = 0
 
     const loop = async () => {
       while (!cancelled) {
@@ -346,31 +421,40 @@ export default function BarcodeScanner() {
         const now = Date.now()
         const transform = videoCoverTransform(video)
 
-        const hits = await recognizeCoconutHits(video)
+        const hits = await recognizeWords(video)
+        frameCount++
+
+        // Clear old OCR entries
+        for (const key of hitboxMapRef.current.keys()) {
+          if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
+        }
+
+        let wordCount = 0
+        let coconutCount = 0
 
         if (hits && hits.length > 0 && transform) {
           const { scale, offsetX, offsetY } = transform
-
-          // Clear old OCR entries (they all have key prefix "ocr:")
-          for (const key of hitboxMapRef.current.keys()) {
-            if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
-          }
+          wordCount = hits.length
+          coconutCount = hits.filter(h => h.isCoconut).length
 
           for (let i = 0; i < hits.length; i++) {
             const hit = hits[i]
-            const x = hit.x * scale + offsetX - HITBOX_PADDING
-            const y = hit.y * scale + offsetY - HITBOX_PADDING
-            const w = hit.w * scale + HITBOX_PADDING * 2
-            const h = hit.h * scale + HITBOX_PADDING * 2
+            const pad = hit.isCoconut ? HITBOX_PADDING : 4
+            const x = hit.x * scale + offsetX - pad
+            const y = hit.y * scale + offsetY - pad
+            const w = hit.w * scale + pad * 2
+            const h = hit.h * scale + pad * 2
 
             hitboxMapRef.current.set(`ocr:${i}`, {
               x, y, w, h,
-              status: 'coconut',
+              status: hit.isCoconut ? 'coconut' : 'clean',
               name: hit.text,
               lastSeenAt: now,
             })
           }
         }
+
+        setOcrDebug({ frames: frameCount, words: wordCount, coconut: coconutCount })
 
         // Evict stale entries
         for (const [key, entry] of hitboxMapRef.current) {
@@ -379,7 +463,7 @@ export default function BarcodeScanner() {
           }
         }
 
-        drawHitboxes(ctx, dw, dh, hitboxMapRef.current)
+        drawOcrHitboxes(ctx, dw, dh, hitboxMapRef.current)
 
         // Wait before next frame to avoid pile-up
         await new Promise((r) => setTimeout(r, 200))
@@ -500,6 +584,18 @@ export default function BarcodeScanner() {
                   ? 'Tap to scan barcode'
                   : 'Point at ingredient list'}
               </span>
+            </div>
+          )}
+
+          {/* OCR debug status pill */}
+          {currentMode === 'ocr' && isViewfinderOpen && (
+            <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
+              <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady}</div>
+              <div>frames: {ocrDebug.frames}</div>
+              <div>words: {ocrDebug.words}</div>
+              {ocrDebug.coconut > 0 && (
+                <div className="font-bold text-red-400">COCONUT: {ocrDebug.coconut}</div>
+              )}
             </div>
           )}
 

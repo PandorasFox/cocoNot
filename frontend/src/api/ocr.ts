@@ -8,6 +8,7 @@ export interface OcrHit {
   y: number
   w: number
   h: number
+  isCoconut: boolean
 }
 
 export type OcrReadyState = 'loading' | 'ready' | 'error'
@@ -144,10 +145,11 @@ function preprocessFrame(
 const SINGLE_WORD_RE = /^(coconut|copra)$/i
 
 /**
- * Run OCR on a video frame and return bounding boxes for coconut-related words.
+ * Run OCR on a video frame and return bounding boxes for ALL detected words.
+ * Each hit is tagged `isCoconut` for coconut-related keywords.
  * Returns null if worker not ready.
  */
-export async function recognizeCoconutHits(
+export async function recognizeWords(
   video: HTMLVideoElement,
 ): Promise<OcrHit[] | null> {
   if (!worker || readyState !== 'ready') return null
@@ -178,44 +180,58 @@ export async function recognizeCoconutHits(
   if (words.length === 0) return null
 
   const hits: OcrHit[] = []
+  const coconutIndices = new Set<number>()
 
+  // First pass: identify coconut matches and mark indices
+  for (let i = 0; i < words.length; i++) {
+    const text = words[i].text.replace(/[^a-zA-Z]/g, '')
+
+    if (SINGLE_WORD_RE.test(text)) {
+      coconutIndices.add(i)
+    } else if (/^cocos$/i.test(text) && i + 1 < words.length) {
+      const nextText = words[i + 1].text.replace(/[^a-zA-Z]/g, '')
+      if (/^nucifera$/i.test(nextText)) {
+        coconutIndices.add(i)
+        coconutIndices.add(i + 1)
+      }
+    }
+  }
+
+  // Second pass: emit all words, merging "cocos nucifera" pairs
   for (let i = 0; i < words.length; i++) {
     const w = words[i]
-    const text = w.text.replace(/[^a-zA-Z]/g, '') // strip punctuation
+    const bb = w.bbox
+    const isCoconut = coconutIndices.has(i)
 
-    // Single-word match
-    if (SINGLE_WORD_RE.test(text)) {
-      const bb = w.bbox
+    // Merge "cocos nucifera" into one hit
+    if (isCoconut && /^cocos$/i.test(w.text.replace(/[^a-zA-Z]/g, '')) && coconutIndices.has(i + 1)) {
+      const next = words[i + 1]
+      const bb2 = next.bbox
+      const x = Math.min(bb.x0, bb2.x0)
+      const y = Math.min(bb.y0, bb2.y0)
       hits.push({
-        text: w.text,
-        x: bb.x0,
-        y: bb.y0,
-        w: bb.x1 - bb.x0,
-        h: bb.y1 - bb.y0,
+        text: `${w.text} ${next.text}`,
+        x,
+        y,
+        w: Math.max(bb.x1, bb2.x1) - x,
+        h: Math.max(bb.y1, bb2.y1) - y,
+        isCoconut: true,
       })
+      i++ // skip next word
       continue
     }
 
-    // Two-word match: "cocos nucifera"
-    if (/^cocos$/i.test(text) && i + 1 < words.length) {
-      const next = words[i + 1]
-      const nextText = next.text.replace(/[^a-zA-Z]/g, '')
-      if (/^nucifera$/i.test(nextText)) {
-        const bb1 = w.bbox
-        const bb2 = next.bbox
-        const x = Math.min(bb1.x0, bb2.x0)
-        const y = Math.min(bb1.y0, bb2.y0)
-        hits.push({
-          text: `${w.text} ${next.text}`,
-          x,
-          y,
-          w: Math.max(bb1.x1, bb2.x1) - x,
-          h: Math.max(bb1.y1, bb2.y1) - y,
-        })
-        i++ // skip next word
-        continue
-      }
-    }
+    // Skip the "nucifera" half if already merged
+    if (isCoconut && /^nucifera$/i.test(w.text.replace(/[^a-zA-Z]/g, ''))) continue
+
+    hits.push({
+      text: w.text,
+      x: bb.x0,
+      y: bb.y0,
+      w: bb.x1 - bb.x0,
+      h: bb.y1 - bb.y0,
+      isCoconut,
+    })
   }
 
   return hits

@@ -56,6 +56,7 @@ func main() {
 	}
 
 	// Start periodic ingestion if DATA_DIR is set (volume mounted)
+	var sched *ingest.Scheduler
 	dataDir := os.Getenv("DATA_DIR")
 	if dataDir != "" {
 		interval := 6 * time.Hour
@@ -66,13 +67,17 @@ func main() {
 				log.Printf("Invalid INGEST_INTERVAL %q, using default %s", v, interval)
 			}
 		}
-		sched := ingest.NewScheduler(pool, dataDir, interval)
+		sched = ingest.NewScheduler(pool, dataDir, interval)
 		go sched.Start(ctx)
 		log.Printf("Ingest scheduler started (interval: %s)", interval)
 	}
 
 	queries := db.NewQueries(pool)
-	router := api.NewRouter(queries)
+	readyFunc := func() bool { return true }
+	if sched != nil {
+		readyFunc = sched.Ready
+	}
+	router := api.NewRouter(queries, readyFunc)
 
 	// Serve frontend static files
 	frontendDir := os.Getenv("FRONTEND_DIR")

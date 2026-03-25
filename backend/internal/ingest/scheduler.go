@@ -15,6 +15,7 @@ type Scheduler struct {
 	dataDir  string
 	interval time.Duration
 	running  atomic.Bool
+	ready    atomic.Bool
 }
 
 // NewScheduler creates a scheduler that runs ingestion every interval.
@@ -26,11 +27,17 @@ func NewScheduler(pool *pgxpool.Pool, dataDir string, interval time.Duration) *S
 	}
 }
 
+// Ready reports whether the first ingestion has completed.
+func (s *Scheduler) Ready() bool {
+	return s.ready.Load()
+}
+
 // Start begins the periodic ingestion loop. Runs one ingestion immediately
 // on startup, then repeats on the configured interval. Blocks until ctx is
 // cancelled.
 func (s *Scheduler) Start(ctx context.Context) {
 	s.runOnce(ctx)
+	s.ready.Store(true)
 
 	ticker := time.NewTicker(s.interval)
 	defer ticker.Stop()

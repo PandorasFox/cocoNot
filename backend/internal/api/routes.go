@@ -1,13 +1,15 @@
 package api
 
 import (
+	"net/http"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/hecate/coconutfree/internal/db"
 )
 
-func NewRouter(queries *db.Queries) *chi.Mux {
+func NewRouter(queries *db.Queries, readyFunc func() bool) *chi.Mux {
 	h := NewHandler(queries)
 
 	r := chi.NewRouter()
@@ -16,6 +18,9 @@ func NewRouter(queries *db.Queries) *chi.Mux {
 	r.Use(middleware.Compress(5))
 
 	r.Route("/api", func(r chi.Router) {
+		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
+			writeJSON(w, map[string]any{"ready": readyFunc()})
+		})
 		r.Get("/products", h.ListProducts)
 		r.Get("/products/sku-dump", h.SKUDump)
 		r.Get("/products/barcode/{sku}", h.GetProductByBarcode)

@@ -84,6 +84,10 @@ export interface SKULookupResult {
   contains_coconut: boolean | null
 }
 
+export function checkHealth() {
+  return fetchJSON<{ ready: boolean }>('/health')
+}
+
 export function skuLookup(skus: string[]) {
   return fetchJSON<{ results: Record<string, SKULookupResult> }>(
     '/products/sku-lookup',
