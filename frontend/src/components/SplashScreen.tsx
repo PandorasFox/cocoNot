@@ -1,5 +1,4 @@
 import { useEffect, useState } from 'react'
-import { initOcr, getOcrReadyState, onOcrReadyChange, type OcrReadyState } from '../api/ocr'
 import { checkHealth, type HealthResponse } from '../api/client'
 
 const SAFETY_TIMEOUT_MS = 5 * 60 * 1000 // 5 minutes
@@ -13,16 +12,13 @@ interface ProgressState {
 
 export default function SplashScreen() {
   const [dismissed, setDismissed] = useState(false)
-  const [ocrStatus, setOcrStatus] = useState<OcrReadyState>(getOcrReadyState)
   const [serverReady, setServerReady] = useState(false)
   const [progress, setProgress] = useState<ProgressState | null>(null)
 
-  // OCR init + subscribe
+  // Safety timeout
   useEffect(() => {
-    initOcr()
-    const unsub = onOcrReadyChange(setOcrStatus)
     const timer = setTimeout(() => setDismissed(true), SAFETY_TIMEOUT_MS)
-    return () => { unsub(); clearTimeout(timer) }
+    return () => clearTimeout(timer)
   }, [])
 
   // Poll server health
@@ -43,11 +39,10 @@ export default function SplashScreen() {
     return () => { cancelled = true }
   }, [])
 
-  // Dismiss when both ready
+  // Dismiss when server ready (OCR inits lazily on button tap)
   useEffect(() => {
-    const ocrDone = ocrStatus === 'ready' || ocrStatus === 'error'
-    if (ocrDone && serverReady) setDismissed(true)
-  }, [ocrStatus, serverReady])
+    if (serverReady) setDismissed(true)
+  }, [serverReady])
 
   if (dismissed) return null
 
@@ -76,8 +71,6 @@ export default function SplashScreen() {
     }
   } else if (!serverReady) {
     message = 'Server starting up...'
-  } else if (ocrStatus === 'loading') {
-    message = 'Loading OCR engine...'
   } else {
     message = 'Ready'
   }

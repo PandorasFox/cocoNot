@@ -737,3 +737,37 @@ User floated the idea of a cheap pre-pass to isolate text-like regions before ru
 ### Files Changed
 - `frontend/src/api/ocr.ts` — POOL_SIZE 2→4, OcrResult type, timing
 - `frontend/src/components/BarcodeScanner.tsx` — 800ms interval, skip tracking, enhanced debug pill
+
+## 2026-03-25 — Three-Button Scanner: Barcode / OCR / Quick OCR
+
+### Problem
+Running barcode + OCR in parallel wastes cycles — barcode detection is noise when scanning ingredients, and OCR is unnecessary when scanning barcodes. Also wanted to test fast language data + character whitelist as a speed optimization.
+
+### Changes
+
+**Split into three dedicated modes**
+- Reverted from unified "cocoNot vision" button back to separate mode buttons
+- Three buttons in sticky footer: Barcode (pink), OCR (blue), Quick (amber)
+- Each mode runs only its detection type — no wasted work
+
+**Mode-aware OCR worker pool**
+- `initOcr(mode: 'standard' | 'fast')` — creates workers with appropriate config
+- Fast mode: uses `tessdata.projectnaptha.com/4.0.0_fast` (smaller LSTM model)
+- Fast mode: sets `tessedit_char_whitelist` restricting to letters, digits, and basic punctuation
+- Generation counter prevents stale init callbacks from clobbering state on mode switch
+- Switching modes terminates existing workers and recreates with new config
+
+**Removed eager OCR init from SplashScreen**
+- Workers now init lazily when a button is tapped
+- Splash screen only gates on server readiness
+- No wasted memory/bandwidth if user only uses barcode mode
+
+**Detection loop split**
+- Barcode mode: only runs `detectBarcodesWithBounds`, no OCR overhead
+- OCR modes: only runs `recognizeWords`, no barcode overhead
+- Debug pill only visible in OCR modes, shows mode indicator (std/fast)
+
+### Files Changed
+- `frontend/src/api/ocr.ts` — OcrMode type, mode-aware initOcr with generation counter, fast lang + whitelist
+- `frontend/src/components/BarcodeScanner.tsx` — ViewfinderMode, three-button footer, mode-branched detection loop
+- `frontend/src/components/SplashScreen.tsx` — removed eager initOcr, simplified dismiss logic

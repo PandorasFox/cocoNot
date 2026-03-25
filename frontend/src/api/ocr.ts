@@ -25,16 +25,23 @@ export interface Tile {
   offsetY: number
 }
 
+export type OcrMode = 'standard' | 'fast'
+
 // ── Constants ─────────────────────────────────────────────────
 
 export const POOL_SIZE = 4
 export const TILE_SIZE = 1024
 export const TILE_OVERLAP = 80
 
+const FAST_LANG_PATH = 'https://tessdata.projectnaptha.com/4.0.0_fast'
+const FAST_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ,():.-/%'
+
 // ── Worker pool state ─────────────────────────────────────────
 
 let workers: Tesseract.Worker[] = []
 let readyState: OcrReadyState = 'loading'
+let currentMode: OcrMode | null = null
+let generation = 0
 const listeners = new Set<(s: OcrReadyState) => void>()
 
 function setReadyState(s: OcrReadyState) {
@@ -51,25 +58,49 @@ export function onOcrReadyChange(fn: (s: OcrReadyState) => void): () => void {
   return () => { listeners.delete(fn) }
 }
 
+export function getOcrMode(): OcrMode | null {
+  return currentMode
+}
+
 // ── Worker lifecycle ───────────────────────────────────────────
 
 let initPromise: Promise<void> | null = null
 
-/** Eagerly initialize the Tesseract worker pool. Safe to call multiple times. */
-export function initOcr(): void {
-  if (initPromise) return
+/** Initialize the Tesseract worker pool in the given mode. Safe to call multiple times. */
+export function initOcr(mode: OcrMode = 'standard'): void {
+  if (initPromise && mode === currentMode) return
+  if (initPromise) terminateOcr()
+
+  currentMode = mode
+  const thisGen = ++generation
   initPromise = (async () => {
     try {
       setReadyState('loading')
-      workers = await Promise.all(
-        Array.from({ length: POOL_SIZE }, () => Tesseract.createWorker('eng')),
+      const opts = mode === 'fast' ? { langPath: FAST_LANG_PATH } : undefined
+      const pool = await Promise.all(
+        Array.from({ length: POOL_SIZE }, () =>
+          Tesseract.createWorker('eng', undefined, opts),
+        ),
       )
+      if (thisGen !== generation) {
+        for (const w of pool) w.terminate().catch(() => {})
+        return
+      }
+      workers = pool
+      if (mode === 'fast') {
+        await Promise.all(
+          workers.map(w => w.setParameters({ tessedit_char_whitelist: FAST_WHITELIST })),
+        )
+      }
+      if (thisGen !== generation) return
       setReadyState('ready')
     } catch {
+      if (thisGen !== generation) return
       setReadyState('error')
       for (const w of workers) w.terminate().catch(() => {})
       workers = []
       initPromise = null
+      currentMode = null
     }
   })()
 }
@@ -79,6 +110,7 @@ export function terminateOcr(): void {
   for (const w of workers) w.terminate().catch(() => {})
   workers = []
   initPromise = null
+  currentMode = null
   setReadyState('loading')
 }
 
