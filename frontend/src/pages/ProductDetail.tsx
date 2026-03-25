@@ -5,6 +5,26 @@ import { extractText } from '../api/parse'
 import StatusBadge from '../components/StatusBadge'
 import Disclaimer from '../components/Disclaimer'
 
+const COCONUT_RE = /coconut|cocos nucifera|copra/gi
+
+function highlightCoconut(text: string) {
+  const parts = text.split(COCONUT_RE)
+  const matches = text.match(COCONUT_RE)
+  if (!matches) return <>{text}</>
+  return (
+    <>
+      {parts.map((part, i) => (
+        <span key={i}>
+          {part}
+          {matches[i] ? (
+            <span className="font-bold text-red-600">{matches[i]}</span>
+          ) : null}
+        </span>
+      ))}
+    </>
+  )
+}
+
 export default function ProductDetail() {
   const { id } = useParams<{ id: string }>()
   const [product, setProduct] = useState<ProductDetailType | null>(null)
@@ -93,7 +113,9 @@ export default function ProductDetail() {
                   </span>
                 </div>
                 <p className="mt-2 text-sm leading-relaxed text-gray-700">
-                  {extractText(s.ingredients_raw) || '(no ingredients text)'}
+                  {extractText(s.ingredients_raw)
+                    ? highlightCoconut(extractText(s.ingredients_raw))
+                    : '(no ingredients text)'}
                 </p>
                 <p className="mt-1 text-xs text-gray-400">
                   Fetched {new Date(s.fetched_at).toLocaleDateString()}

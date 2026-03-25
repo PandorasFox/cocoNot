@@ -140,7 +140,10 @@ export default function BarcodeScanner() {
   }, [stopStream])
 
   const handleTap = useCallback(async () => {
-    if (!videoRef.current || state.status !== 'viewfinder') return
+    const canScan =
+      state.status === 'viewfinder' ||
+      (state.status === 'error' && state.inViewfinder)
+    if (!videoRef.current || !canScan) return
 
     setState({ status: 'processing', source: 'viewfinder' })
     try {

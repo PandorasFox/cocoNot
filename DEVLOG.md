@@ -364,3 +364,10 @@ Embedded PostgreSQL 15 into the app container so deployment is a single `docker 
 - Debian bookworm ships PG 15 (not 16). No PG16-specific features used, so this is fine.
 - Image is larger (~318 MB of PG + deps) but eliminates multi-container orchestration.
 - `docker run -p 8080:8080 -v pgdata:/var/lib/postgresql/data -v offdata:/data coconutfree-app` is now a valid single-command deploy.
+
+## 2026-03-25 — Session 10: Highlight Coconut in Ingredients
+
+### What Changed
+- Product detail page now **bolds and colors red** any coconut-related keywords (`coconut`, `cocos nucifera`, `copra`) in the raw ingredients text
+- Uses regex split/match to wrap matching substrings in `<span className="font-bold text-red-600">` while preserving the original casing
+- Makes it immediately obvious when coconut is present in a wall of ingredient text
