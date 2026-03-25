@@ -1,5 +1,16 @@
 # CoconutFree - Dev Log
 
+## 2026-03-25 — OCR Scan Region (center crop + visual overlay, remove tiling)
+
+**Problem:** OCR was 2-3s per frame processing the full 1920x1080 frame. Tiling machinery added complexity without benefit for a center-crop approach.
+
+**Changes:**
+- **`frontend/src/api/ocr.ts`**: Removed tiling pipeline (`createTiles`, `tilePositions`, `TILE_SIZE`, `TILE_OVERLAP`, `Tile` type) and `deduplicateHits`. Added `ScanRegion` type. `recognizeWords` now accepts an optional `ScanRegion`, draws just that rectangle to an OffscreenCanvas, and feeds it to a single worker. Coordinate remapping adds region offsets back. Crash recovery tries next worker in the pool.
+- **`frontend/src/components/BarcodeScanner.tsx`**: Computes center 50%x50% scan region in video coordinates, passes to `recognizeWords`. Added dimmed overlay with white-bordered center box (turns red on coconut detection) in OCR modes. Debug pill simplified (removed tiles line).
+- **`frontend/src/api/__tests__/ocr.test.ts`**: Removed `deduplicateHits` tests and import.
+
+**Result:** ~4x fewer pixels processed per frame. tsc clean, 64/64 tests pass.
+
 ## 2026-03-22 — Project Kickoff
 
 ### The Problem

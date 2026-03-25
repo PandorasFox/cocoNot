@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound } from '../api/cache'
-import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type OcrResult } from '../api/ocr'
+import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type OcrResult, type ScanRegion } from '../api/ocr'
 import {
   drawUnifiedHitboxes, videoCoverTransform,
   HITBOX_RETAIN_MS, HITBOX_PADDING,
@@ -29,8 +29,8 @@ export default function BarcodeScanner() {
   const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
   const [ocrDebug, setOcrDebug] = useState<{
     frames: number; words: number; coconut: number
-    lastMs: number; skipped: number; tiles: number
-  }>({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0, tiles: 0 })
+    lastMs: number; skipped: number
+  }>({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0 })
 
   // Subscribe to OCR readiness changes
   useEffect(() => onOcrReadyChange(setOcrReady), [])
@@ -104,7 +104,7 @@ export default function BarcodeScanner() {
     if (!viewfinderMode) return
 
     hitboxMapRef.current.clear()
-    setOcrDebug({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0, tiles: 0 })
+    setOcrDebug({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0 })
     let ocrBusy = false
     let frameCount = 0
     let skippedCount = 0
@@ -181,7 +181,15 @@ export default function BarcodeScanner() {
         } else {
           ocrBusy = true
           try {
-            ocrResult = await recognizeWords(video)
+            const vw = video.videoWidth
+            const vh = video.videoHeight
+            const region: ScanRegion = {
+              x: Math.round(vw * 0.25),
+              y: Math.round(vh * 0.25),
+              w: Math.round(vw * 0.5),
+              h: Math.round(vh * 0.5),
+            }
+            ocrResult = await recognizeWords(video, region)
           } finally {
             ocrBusy = false
           }
@@ -189,7 +197,7 @@ export default function BarcodeScanner() {
 
         if (ocrResult !== null) {
           frameCount++
-          const { hits: ocrHits, durationMs, tileCount } = ocrResult
+          const { hits: ocrHits, durationMs } = ocrResult
           if (ocrHits.length > 0 && transform) {
             const { scale, offsetX, offsetY } = transform
             const coconutHits = ocrHits.filter(h => h.isCoconut)
@@ -215,7 +223,7 @@ export default function BarcodeScanner() {
           }
           setOcrDebug({
             frames: frameCount, words: ocrHits.length, coconut: liveCoconut,
-            lastMs: durationMs, skipped: skippedCount, tiles: tileCount,
+            lastMs: durationMs, skipped: skippedCount,
           })
         }
 
@@ -330,6 +338,23 @@ export default function BarcodeScanner() {
             className="pointer-events-none absolute inset-0 h-full w-full"
           />
 
+          {/* Scan region overlay (OCR modes only) */}
+          {isOcrMode && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+              <div
+                className="relative"
+                style={{
+                  width: '50%',
+                  height: '50%',
+                  boxShadow: '0 0 0 9999px rgba(0,0,0,0.5)',
+                  border: ocrDebug.coconut > 0
+                    ? '2px solid #ef4444'
+                    : '2px solid white',
+                }}
+              />
+            </div>
+          )}
+
           <button
             onClick={closeViewfinder}
             className="absolute top-4 right-4 flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-xl text-white backdrop-blur-sm"
@@ -350,8 +375,7 @@ export default function BarcodeScanner() {
             <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
               <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady} ({viewfinderMode === 'ocr-fast' ? 'fast' : 'std'})</div>
               <div>frames: {ocrDebug.frames} | skip: {ocrDebug.skipped}</div>
-              <div>tiles: {ocrDebug.tiles} | {ocrDebug.lastMs}ms</div>
-              <div>words: {ocrDebug.words}</div>
+              <div>{ocrDebug.lastMs}ms | words: {ocrDebug.words}</div>
               {ocrDebug.coconut > 0 && (
                 <div className="font-bold text-red-400">COCONUT: {ocrDebug.coconut}</div>
               )}

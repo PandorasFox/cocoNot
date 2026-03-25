@@ -3,7 +3,7 @@ import Tesseract from 'tesseract.js'
 import { createCanvas } from 'canvas'
 import fs from 'node:fs'
 import path from 'node:path'
-import { otsuThreshold, tagCoconutWords, type WordBox, flattenWords, deduplicateHits, type OcrHit } from '../ocr'
+import { otsuThreshold, tagCoconutWords, type WordBox, flattenWords } from '../ocr'
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -146,56 +146,6 @@ describe('tagCoconutWords', () => {
 describe('flattenWords', () => {
   it('returns empty for undefined blocks', () => {
     expect(flattenWords(undefined)).toEqual([])
-  })
-})
-
-// ── Unit tests: deduplicateHits ──────────────────────────────
-
-function makeHit(text: string, x: number, y: number, w: number, h: number, isCoconut: boolean): OcrHit {
-  return { text, x, y, w, h, isCoconut }
-}
-
-describe('deduplicateHits', () => {
-  it('returns empty array for empty input', () => {
-    expect(deduplicateHits([])).toEqual([])
-  })
-
-  it('keeps non-overlapping coconut hits', () => {
-    const hits = [
-      makeHit('coconut', 0, 0, 100, 20, true),
-      makeHit('coconut', 500, 0, 100, 20, true),
-    ]
-    expect(deduplicateHits(hits)).toHaveLength(2)
-  })
-
-  it('deduplicates overlapping coconut hits from tile overlap', () => {
-    const hits = [
-      makeHit('coconut', 100, 50, 120, 25, true),
-      makeHit('coconut', 102, 49, 118, 26, true), // nearly identical — from adjacent tile
-    ]
-    const result = deduplicateHits(hits)
-    expect(result).toHaveLength(1)
-    expect(result[0].text).toBe('coconut')
-  })
-
-  it('does not deduplicate non-coconut hits', () => {
-    const hits = [
-      makeHit('water', 100, 50, 80, 20, false),
-      makeHit('water', 101, 50, 79, 20, false), // overlapping but not coconut
-    ]
-    expect(deduplicateHits(hits)).toHaveLength(2)
-  })
-
-  it('preserves mix of coconut and non-coconut hits', () => {
-    const hits = [
-      makeHit('water', 0, 0, 80, 20, false),
-      makeHit('coconut', 100, 0, 120, 25, true),
-      makeHit('coconut', 101, 1, 119, 24, true), // dupe
-      makeHit('sugar', 300, 0, 80, 20, false),
-    ]
-    const result = deduplicateHits(hits)
-    expect(result).toHaveLength(3)
-    expect(result.filter(h => h.isCoconut)).toHaveLength(1)
   })
 })
 
