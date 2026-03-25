@@ -22,16 +22,6 @@ export interface IngredientSource {
   created_at: string
 }
 
-export interface UserFlag {
-  id: string
-  product_id: string
-  flag_type: string
-  notes: string
-  photo_url?: string
-  resolved: boolean
-  created_at: string
-}
-
 export interface StatusChange {
   id: string
   product_id: string
@@ -43,7 +33,6 @@ export interface StatusChange {
 
 export interface ProductDetail extends Product {
   sources: IngredientSource[]
-  flags: UserFlag[]
   history: StatusChange[]
 }
 
@@ -94,10 +83,3 @@ export function fuzzySearch(q: string, limit = 20) {
   return fetchJSON<{ products: Product[] }>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`)
 }
 
-export function createFlag(productId: string, flagType: string, notes: string) {
-  return fetchJSON<UserFlag>(`/products/${productId}/flag`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ flag_type: flagType, notes }),
-  })
-}

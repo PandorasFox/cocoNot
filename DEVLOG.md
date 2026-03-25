@@ -217,3 +217,20 @@ User wants to keep the **entire** OFF dataset (not just frozen desserts) — had
 2. **Disclaimer phrasing** — changed from "This tool helps filter — it is not a guarantee" to "Always check the label! Online sources are not always up to date."
 3. **Raw JSON/multilingual ingredient text** — OFF data has ingredients in multiple languages. Ingestion now prefers `ingredients_text_en` for display, but concatenates ALL `ingredients_text_*` columns for coconut detection (catches coconut in any language).
 4. **Rename to CocoNot** — all user-facing strings updated (nav, page title, log messages, user-agent). Go module path and DB credentials left as-is (internal plumbing).
+
+## 2026-03-25 — Session 5: Major Cleanup Pass
+
+### User Feedback Round 2
+Lots of good catches from testing the actual UI:
+
+1. **Status badge overhaul** — dropped "Possibly clean as of DATE". Now just two states:
+   - **CONTAINS COCONUT** (red)
+   - **¯\_(ツ)_/¯** (gray) — "fuck if I know, read the label"
+2. **User-agent** — changed to `github.com/pandorasfox/coconot`
+3. **Product images** — now displayed on cards (16x16) and detail page (24x24)
+4. **SKU search** — search bar detects numeric-only input and does direct SKU lookup. Note: SKU != barcode. Barcode scanning is a future feature.
+5. **Dropped flagging UI** — removed "I found coconut" / "Report an issue" buttons. App is read-only. Instead, link to product on Open Food Facts with "Contribute to correct ingredient issues!"
+6. **OFF links** — ingredient source type is now a clickable link to the OFF product page
+7. **Localization fix** — the ROOT CAUSE: parquet stores `product_name` and `ingredients_text` as `LIST(STRUCT(lang, text))`. Old code used `array_to_string()` which dumped raw struct repr as `{'lang': main, 'text': Premium Ice Cream}`. Fixed with DuckDB `UNNEST` to extract `en`/`main` lang text properly.
+8. **Coconut detection** — now scans ALL language variants of ingredients (not just EN) by concatenating all `ingredients_text_*` columns
+9. **Duplicate ingredient sources** — added unique index on `(product_id, source_type)` with proper `ON CONFLICT DO UPDATE` upsert (migration 003)

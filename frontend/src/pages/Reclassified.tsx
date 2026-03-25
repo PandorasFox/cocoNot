@@ -58,7 +58,5 @@ export default function Reclassified() {
 function StatusLabel({ containsCoconut }: { containsCoconut: boolean | null }) {
   if (containsCoconut === true)
     return <span className="text-xs font-semibold text-red-600">Coconut</span>
-  if (containsCoconut === false)
-    return <span className="text-xs font-semibold text-amber-600">Possibly clean</span>
-  return <span className="text-xs text-gray-400">Unknown</span>
+  return <span className="text-xs text-gray-400">{'¯\\_(ツ)_/¯'}</span>
 }

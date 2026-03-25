@@ -97,7 +97,7 @@ func downloadParquet(dest string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "CocoNot/1.0 (github.com/hecate/coconot)")
+	req.Header.Set("User-Agent", "CocoNot/1.0 (github.com/pandorasfox/coconot)")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -144,14 +144,42 @@ func queryParquet(path string) ([]offProduct, error) {
 	log.Printf("Parquet schema sample: product_name=%s, brands=%s, ingredients_text=%s, categories_tags=%s",
 		colTypes["product_name"], colTypes["brands"], colTypes["ingredients_text"], colTypes["categories_tags"])
 
-	// Helper: build a CAST expression that coerces any column to a VARCHAR string
+	isStructList := func(typ string) bool {
+		upper := strings.ToUpper(typ)
+		return strings.Contains(upper, "STRUCT") && strings.Contains(upper, "LIST")
+	}
+	isList := func(typ string) bool {
+		upper := strings.ToUpper(typ)
+		return strings.Contains(upper, "LIST") || strings.Contains(upper, "[]")
+	}
+
+	// Extract text from a LIST(STRUCT(lang, text)) — prefer 'en', then 'main', then first entry
+	extractLangText := func(col string) string {
+		return fmt.Sprintf(`COALESCE(
+			(SELECT s.text FROM UNNEST(%s) AS t(s) WHERE s.lang = 'en' LIMIT 1),
+			(SELECT s.text FROM UNNEST(%s) AS t(s) WHERE s.lang = 'main' LIMIT 1),
+			(SELECT s.text FROM UNNEST(%s) AS t(s) LIMIT 1),
+			''
+		)`, col, col, col)
+	}
+
+	// Extract ALL text entries from a LIST(STRUCT(lang, text)) — for coconut detection
+	extractAllText := func(col string) string {
+		return fmt.Sprintf(`COALESCE(
+			(SELECT string_agg(s.text, ' ') FROM UNNEST(%s) AS t(s)),
+			''
+		)`, col)
+	}
+
+	// Coerce any column to a scalar string
 	toStr := func(col string) string {
 		typ := colTypes[col]
-		if strings.Contains(strings.ToUpper(typ), "LIST") || strings.Contains(strings.ToUpper(typ), "[]") {
-			// List type — join elements into comma-separated string
+		if isStructList(typ) {
+			return extractLangText(col)
+		}
+		if isList(typ) {
 			return fmt.Sprintf("COALESCE(array_to_string(%s, ', '), '')", col)
 		}
-		// Scalar — just coalesce to empty string
 		return fmt.Sprintf("COALESCE(CAST(%s AS VARCHAR), '')", col)
 	}
 
@@ -164,7 +192,7 @@ func queryParquet(path string) ([]offProduct, error) {
 		}
 	}
 
-	// Prefer English ingredients text, fall back to generic
+	// Ingredients: prefer ingredients_text_en, fall back to ingredients_text
 	ingredientsExpr := "''"
 	for _, candidate := range []string{"ingredients_text_en", "ingredients_text"} {
 		if _, ok := colTypes[candidate]; ok {
@@ -173,12 +201,17 @@ func queryParquet(path string) ([]offProduct, error) {
 		}
 	}
 
-	// Build a concat of all available ingredients_text columns for coconut detection
-	// (catches coconut mentioned in any language)
+	// For coconut detection: concat ALL text from ALL ingredients_text* columns
 	var ingredientsCols []string
-	for col := range colTypes {
+	for col, typ := range colTypes {
 		if strings.HasPrefix(col, "ingredients_text") {
-			ingredientsCols = append(ingredientsCols, toStr(col))
+			if isStructList(typ) {
+				ingredientsCols = append(ingredientsCols, extractAllText(col))
+			} else if isList(typ) {
+				ingredientsCols = append(ingredientsCols, fmt.Sprintf("COALESCE(array_to_string(%s, ' '), '')", col))
+			} else {
+				ingredientsCols = append(ingredientsCols, fmt.Sprintf("COALESCE(CAST(%s AS VARCHAR), '')", col))
+			}
 		}
 	}
 	ingredientsAllExpr := "''"
@@ -297,6 +330,10 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 				_, err = pool.Exec(ctx, `
 					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
 					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
+					ON CONFLICT (product_id, source_type) DO UPDATE SET
+						ingredients_raw = EXCLUDED.ingredients_raw,
+						coconut_found = EXCLUDED.coconut_found,
+						fetched_at = EXCLUDED.fetched_at
 				`, uuid.New(), id, p.Code, p.IngredientsText, coconutFound, now)
 				if err != nil {
 					return stats, fmt.Errorf("inserting source for %s: %w", p.Code, err)
@@ -347,7 +384,10 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 				_, err = pool.Exec(ctx, `
 					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
 					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
-					ON CONFLICT DO NOTHING
+					ON CONFLICT (product_id, source_type) DO UPDATE SET
+						ingredients_raw = EXCLUDED.ingredients_raw,
+						coconut_found = EXCLUDED.coconut_found,
+						fetched_at = EXCLUDED.fetched_at
 				`, uuid.New(), existingID, p.Code, p.IngredientsText, coconutFound, now)
 				if err != nil {
 					return stats, fmt.Errorf("upserting source for %s: %w", p.Code, err)

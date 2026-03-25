@@ -1,11 +1,17 @@
 import { useState, useEffect, useCallback } from 'react'
-import { listProducts, type Product } from '../api/client'
+import { useNavigate } from 'react-router-dom'
+import { listProducts, getProductByBarcode, type Product } from '../api/client'
 import ProductCard from '../components/ProductCard'
 import Disclaimer from '../components/Disclaimer'
 
-type Filter = 'all' | 'possibly_clean' | 'contains_coconut'
+type Filter = 'all' | 'shrug' | 'contains_coconut'
+
+function looksLikeSKU(q: string): boolean {
+  return /^\d{8,14}$/.test(q.trim())
+}
 
 export default function Home() {
+  const navigate = useNavigate()
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [products, setProducts] = useState<Product[]>([])
@@ -13,23 +19,34 @@ export default function Home() {
   const [loading, setLoading] = useState(false)
 
   const search = useCallback(async () => {
+    const q = query.trim()
     setLoading(true)
     try {
+      // If it looks like a SKU, try direct lookup first
+      if (looksLikeSKU(q)) {
+        try {
+          const product = await getProductByBarcode(q)
+          navigate(`/product/${product.id}`)
+          return
+        } catch {
+          // Not found by SKU — fall through to text search
+        }
+      }
+
       const coconut =
         filter === 'contains_coconut' ? true
-        : filter === 'possibly_clean' ? false
+        : filter === 'shrug' ? false
         : undefined
-      const res = await listProducts({ q: query || undefined, coconut })
+      const res = await listProducts({ q: q || undefined, coconut })
       setProducts(res.products ?? [])
       setTotal(res.total)
     } catch {
-      // API not available yet — that's fine during dev
       setProducts([])
       setTotal(0)
     } finally {
       setLoading(false)
     }
-  }, [query, filter])
+  }, [query, filter, navigate])
 
   useEffect(() => {
     const timer = setTimeout(search, 300)
@@ -42,7 +59,7 @@ export default function Home() {
 
       <input
         type="search"
-        placeholder="Search by brand or product name..."
+        placeholder="Search by brand, product name, or SKU..."
         value={query}
         onChange={(e) => setQuery(e.target.value)}
         className="w-full rounded-lg border border-gray-300 px-4 py-3 text-base outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-200"
@@ -51,7 +68,7 @@ export default function Home() {
       <div className="flex gap-2">
         {([
           ['all', 'All'],
-          ['possibly_clean', 'Possibly Clean'],
+          ['shrug', '¯\\_(ツ)_/¯'],
           ['contains_coconut', 'Contains Coconut'],
         ] as [Filter, string][]).map(([value, label]) => (
           <button
