@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Test output (generated hitbox overlay images)
+test-data/ocr-output

@@ -1,13 +1,18 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { createCanvas } from 'canvas'
+import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
+import { createCanvas, loadImage } from 'canvas'
+import fs from 'node:fs'
+import path from 'node:path'
+import Tesseract from 'tesseract.js'
 import {
   drawUnifiedHitboxes,
   videoCoverTransform,
   relativeLuminance,
   HITBOX_COLORS,
+  HITBOX_PADDING,
   STATUS_LABELS,
   type HitboxEntry,
 } from '../hitbox'
+import { flattenWords, tagCoconutWords } from '../../api/ocr'
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -217,4 +222,84 @@ describe('drawUnifiedHitboxes', () => {
     // 3 chip labels
     expect(fillTextSpy).toHaveBeenCalledTimes(3)
   })
+})
+
+// ── Visual hitbox output (OCR → hitboxes → annotated images) ─────
+
+const imagesDir = path.resolve(__dirname, '../../../test-data/ocr-images')
+const outputDir = path.resolve(__dirname, '../../../test-data/ocr-output')
+
+const testImages = fs.existsSync(imagesDir)
+  ? fs.readdirSync(imagesDir).filter(f => /\.jpe?g$/i.test(f)).sort()
+  : []
+
+describe('visual hitbox output', () => {
+  let worker: Tesseract.Worker
+
+  beforeAll(async () => {
+    fs.mkdirSync(outputDir, { recursive: true })
+    worker = await Tesseract.createWorker('eng')
+  }, 60_000)
+
+  afterAll(async () => {
+    if (worker) await worker.terminate()
+  })
+
+  it.skipIf(testImages.length === 0)('test images exist', () => {
+    expect(testImages.length).toBeGreaterThan(0)
+  })
+
+  for (const filename of testImages) {
+    it(`generates hitbox overlay for ${filename}`, async () => {
+      const imgPath = path.join(imagesDir, filename)
+      const img = await loadImage(imgPath)
+      const { width, height } = img
+
+      // Run OCR on the raw image
+      const result = await worker.recognize(imgPath, {}, { blocks: true })
+      const words = flattenWords(result.data.blocks)
+      const hits = tagCoconutWords(words)
+      const coconutHits = hits.filter(h => h.isCoconut)
+
+      // Build hitbox map from coconut matches
+      const hitboxMap = new Map<string, HitboxEntry>()
+      for (let i = 0; i < coconutHits.length; i++) {
+        const hit = coconutHits[i]
+        hitboxMap.set(`ocr:${i}`, {
+          x: hit.x - HITBOX_PADDING,
+          y: hit.y - HITBOX_PADDING,
+          w: hit.w + HITBOX_PADDING * 2,
+          h: hit.h + HITBOX_PADDING * 2,
+          status: 'coconut',
+          name: hit.text,
+          lastSeenAt: Date.now(),
+        })
+      }
+
+      // Draw source image on main canvas
+      const canvas = createCanvas(width, height)
+      const mainCtx = canvas.getContext('2d')
+      mainCtx.drawImage(img as unknown as CanvasImageSource, 0, 0)
+
+      // Draw hitboxes on a transparent overlay, then composite
+      const overlay = createCanvas(width, height)
+      const overlayCtx = overlay.getContext('2d') as unknown as CanvasRenderingContext2D
+      drawUnifiedHitboxes(overlayCtx, width, height, hitboxMap)
+      mainCtx.drawImage(overlay as unknown as CanvasImageSource, 0, 0)
+
+      // Save annotated output
+      const outName = filename.replace(/\.jpe?g$/i, '.png')
+      const outPath = path.join(outputDir, outName)
+      const buffer = canvas.toBuffer('image/png')
+      fs.writeFileSync(outPath, buffer)
+
+      expect(fs.existsSync(outPath)).toBe(true)
+      expect(buffer.length).toBeGreaterThan(0)
+
+      // Log summary for visual inspection
+      console.log(
+        `  ${filename}: ${words.length} words, ${coconutHits.length} coconut hits → ${outName}`,
+      )
+    }, 30_000)
+  }
 })
