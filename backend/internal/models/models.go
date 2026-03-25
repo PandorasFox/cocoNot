@@ -64,3 +64,14 @@ type FlagRequest struct {
 	FlagType string `json:"flag_type"`
 	Notes    string `json:"notes"`
 }
+
+// SKULookupRequest is the payload for bulk SKU lookups.
+type SKULookupRequest struct {
+	SKUs []string `json:"skus"`
+}
+
+// SKULookupResult is the per-SKU response from a bulk lookup.
+type SKULookupResult struct {
+	Name            string `json:"name"`
+	ContainsCoconut *bool  `json:"contains_coconut"`
+}

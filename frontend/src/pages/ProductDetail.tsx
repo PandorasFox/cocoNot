@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { getProduct, type ProductDetail as ProductDetailType } from '../api/client'
 import { extractText } from '../api/parse'
+import { putProduct } from '../api/cache'
 import StatusBadge from '../components/StatusBadge'
 import Disclaimer from '../components/Disclaimer'
 
@@ -33,7 +34,10 @@ export default function ProductDetail() {
   useEffect(() => {
     if (!id) return
     getProduct(id)
-      .then(setProduct)
+      .then((p) => {
+        setProduct(p)
+        putProduct(p)
+      })
       .catch(() => setError('Product not found'))
   }, [id])
 

@@ -382,3 +382,40 @@ Added rotation retry logic to `frontend/src/api/barcode.ts`:
 - New `rotateBitmap(src, degrees)` — uses `OffscreenCanvas` to rotate an `ImageBitmap` by arbitrary degrees (computes bounding box from cos/sin)
 - New `detectWithRotations(bitmap)` — tries detection at 0°, then 45°, then 90° if no barcode found. 1D barcodes are symmetric so 180°/270° are redundant
 - Applied to all three detection paths: `detectBarcode` (file picker), `detectBarcodeFromVideo` (single frame), and `detectBarcodeBurst` (multi-frame burst)
+
+## 2026-03-25 — Session 12: IndexedDB Cache + SKU Lookup API + Viewfinder Hitboxes
+
+### What Was Built
+Three interconnected features for real-time barcode status overlay in the viewfinder:
+
+**1. Bulk SKU Lookup Endpoint — `POST /api/products/sku-lookup`**
+- Accepts `{ "skus": ["...", "..."] }`, returns `{ "results": { "sku": { "name", "contains_coconut" } } }`
+- Minimal response surface — only returns name + coconut status (no full product objects)
+- SKUs not in DB are simply absent from results (client infers "not found")
+- Capped at 50 SKUs per request
+- Backend: `LookupSKUs()` query uses `WHERE sku = ANY($1)` for single-query batch lookup
+
+**2. IndexedDB Cache — `frontend/src/api/cache.ts`**
+- Chose **IndexedDB over localStorage**: 50 MB+ storage (vs 5-10 MB), async keyed lookups (vs parsing entire JSON blob every read), scales to millions of records
+- DB: `coconot`, object store: `skus`, keyPath: `sku`
+- Three statuses: `coconut` (red), `clean` (yellow), `not_found` (blue)
+- Populated on-demand from: search results, product detail views, barcode scans, and batch SKU lookups
+- `cachedAt` timestamp stored for future staleness/TTL support
+- Future: settings page with "Download database" button for category-based preloading with size estimates
+
+**3. Viewfinder Hitbox Overlays — `BarcodeScanner.tsx`**
+- `<canvas>` element overlaid on `<video>` with `pointer-events: none`
+- Continuous detection loop (300ms `setInterval`) runs `detectBarcodesWithBounds()` while viewfinder is open
+- Coordinate mapping from video natural dimensions → display dimensions handles `object-cover` scaling/cropping
+- Colored rounded-rect borders drawn around detected barcodes:
+  - **Red** = contains coconut
+  - **Yellow** = in DB, no coconut detected
+  - **Blue** = SKU not in database
+  - No border = not yet looked up (fires batch API call, resolves on next frame)
+- In-flight SKU deduplication via `Set<string>` ref prevents duplicate API calls
+- Tap still navigates to product detail (existing behavior preserved)
+
+### Cache Population Points
+- `Home.tsx`: `putProducts()` after search results load
+- `ProductDetail.tsx`: `putProduct()` after product detail loads
+- `BarcodeScanner.tsx`: `putProduct()`/`putNotFound()` after barcode lookup, batch `putSKULookupResults()` from viewfinder detection loop

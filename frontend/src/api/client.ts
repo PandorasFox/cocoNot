@@ -85,3 +85,19 @@ export function fuzzySearch(q: string, limit = 20) {
   return fetchJSON<{ products: Product[] }>(`/search?q=${encodeURIComponent(q)}&limit=${limit}`)
 }
 
+export interface SKULookupResult {
+  name: string
+  contains_coconut: boolean | null
+}
+
+export function skuLookup(skus: string[]) {
+  return fetchJSON<{ results: Record<string, SKULookupResult> }>(
+    '/products/sku-lookup',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skus }),
+    },
+  )
+}
+

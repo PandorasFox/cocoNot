@@ -148,6 +148,31 @@ func (h *Handler) CreateFlag(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, flag)
 }
 
+func (h *Handler) SKULookup(w http.ResponseWriter, r *http.Request) {
+	var req models.SKULookupRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.SKUs) == 0 {
+		http.Error(w, "skus required", http.StatusBadRequest)
+		return
+	}
+	if len(req.SKUs) > 50 {
+		http.Error(w, "max 50 SKUs per request", http.StatusBadRequest)
+		return
+	}
+
+	results, err := h.queries.LookupSKUs(r.Context(), req.SKUs)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	writeJSON(w, map[string]any{"results": results})
+}
+
 func (h *Handler) FuzzySearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {

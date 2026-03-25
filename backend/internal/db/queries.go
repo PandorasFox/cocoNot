@@ -220,6 +220,28 @@ func (q *Queries) markContainsCoconut(ctx context.Context, productID uuid.UUID, 
 	return err
 }
 
+func (q *Queries) LookupSKUs(ctx context.Context, skus []string) (map[string]models.SKULookupResult, error) {
+	rows, err := q.pool.Query(ctx, `
+		SELECT sku, name, contains_coconut
+		FROM products WHERE sku = ANY($1)
+	`, skus)
+	if err != nil {
+		return nil, fmt.Errorf("looking up SKUs: %w", err)
+	}
+	defer rows.Close()
+
+	results := make(map[string]models.SKULookupResult, len(skus))
+	for rows.Next() {
+		var sku string
+		var r models.SKULookupResult
+		if err := rows.Scan(&sku, &r.Name, &r.ContainsCoconut); err != nil {
+			return nil, fmt.Errorf("scanning SKU lookup: %w", err)
+		}
+		results[sku] = r
+	}
+	return results, rows.Err()
+}
+
 func (q *Queries) FuzzySearch(ctx context.Context, query string, limit int) ([]models.Product, error) {
 	rows, err := q.pool.Query(ctx, `
 		SELECT id, sku, brand, name, category, image_url, contains_coconut, status_as_of, created_at, updated_at

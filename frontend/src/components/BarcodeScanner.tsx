@@ -1,7 +1,8 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { getProductByBarcode } from '../api/client'
-import { detectBarcode, detectBarcodeBurst } from '../api/barcode'
+import { getProductByBarcode, skuLookup } from '../api/client'
+import { detectBarcode, detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
+import { getStatuses, putSKULookupResults, putProduct, putNotFound, type CachedSKU } from '../api/cache'
 
 type ScanState =
   | { status: 'idle' }
@@ -9,11 +10,53 @@ type ScanState =
   | { status: 'processing'; source: 'file' | 'viewfinder' }
   | { status: 'error'; message: string; inViewfinder: boolean }
 
+// Colors for hitbox borders
+const HITBOX_COLORS: Record<CachedSKU['status'], string> = {
+  coconut: '#ef4444',   // red
+  clean: '#eab308',     // yellow
+  not_found: '#3b82f6', // blue
+}
+
+/**
+ * Compute the mapping from video natural coordinates to display coordinates.
+ * The video uses object-cover, so it scales up and crops to fill the container.
+ */
+function videoCoverTransform(video: HTMLVideoElement) {
+  const vw = video.videoWidth
+  const vh = video.videoHeight
+  const dw = video.clientWidth
+  const dh = video.clientHeight
+  if (!vw || !vh || !dw || !dh) return null
+
+  const videoAspect = vw / vh
+  const displayAspect = dw / dh
+
+  let scale: number
+  let offsetX: number
+  let offsetY: number
+
+  if (videoAspect > displayAspect) {
+    // Video is wider — cropped horizontally
+    scale = dh / vh
+    offsetX = (dw - vw * scale) / 2
+    offsetY = 0
+  } else {
+    // Video is taller — cropped vertically
+    scale = dw / vw
+    offsetX = 0
+    offsetY = (dh - vh * scale) / 2
+  }
+
+  return { scale, offsetX, offsetY }
+}
+
 export default function BarcodeScanner() {
   const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const inFlightRef = useRef(new Set<string>())
   const [state, setState] = useState<ScanState>({ status: 'idle' })
 
   // Stop the camera stream
@@ -32,10 +75,12 @@ export default function BarcodeScanner() {
     async (sku: string) => {
       try {
         const product = await getProductByBarcode(sku)
+        putProduct(product)
         stopStream()
         setState({ status: 'idle' })
         navigate(`/product/${product.id}`)
       } catch {
+        putNotFound(sku)
         stopStream()
         setState({ status: 'idle' })
         navigate(`/?q=${encodeURIComponent(sku)}`)
@@ -114,6 +159,98 @@ export default function BarcodeScanner() {
     }
   }, [isViewfinderOpen])
 
+  // ── Continuous detection loop for hitbox overlays ──────────
+
+  useEffect(() => {
+    if (!isViewfinderOpen) return
+
+    const id = setInterval(async () => {
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      if (!video || !canvas || video.readyState < video.HAVE_CURRENT_DATA) return
+
+      // Size canvas to match video display size
+      const dw = video.clientWidth
+      const dh = video.clientHeight
+      if (canvas.width !== dw || canvas.height !== dh) {
+        canvas.width = dw
+        canvas.height = dh
+      }
+
+      const ctx = canvas.getContext('2d')
+      if (!ctx) return
+
+      ctx.clearRect(0, 0, dw, dh)
+
+      // Detect barcodes with bounding boxes
+      let detections: { rawValue: string; boundingBox: DOMRectReadOnly }[]
+      try {
+        detections = await detectBarcodesWithBounds(video)
+      } catch {
+        return
+      }
+
+      if (detections.length === 0) return
+
+      const transform = videoCoverTransform(video)
+      if (!transform) return
+
+      // Look up all detected SKUs in cache
+      const skus = detections.map((d) => d.rawValue)
+      const cached = await getStatuses(skus)
+
+      // Fire batch lookup for cache misses
+      const misses = skus.filter(
+        (sku) => !cached.has(sku) && !inFlightRef.current.has(sku),
+      )
+      if (misses.length > 0) {
+        for (const sku of misses) inFlightRef.current.add(sku)
+        skuLookup(misses)
+          .then((res) => putSKULookupResults(res.results, misses))
+          .catch(() => {})
+          .finally(() => {
+            for (const sku of misses) inFlightRef.current.delete(sku)
+          })
+      }
+
+      // Draw hitboxes
+      const { scale, offsetX, offsetY } = transform
+      const lineWidth = 3
+
+      for (const det of detections) {
+        const entry = cached.get(det.rawValue)
+        if (!entry) continue // no cached status yet — skip drawing
+
+        const bb = det.boundingBox
+        const x = bb.x * scale + offsetX
+        const y = bb.y * scale + offsetY
+        const w = bb.width * scale
+        const h = bb.height * scale
+
+        ctx.strokeStyle = HITBOX_COLORS[entry.status]
+        ctx.lineWidth = lineWidth
+        ctx.lineJoin = 'round'
+
+        // Rounded rect
+        const r = 6
+        ctx.beginPath()
+        ctx.moveTo(x + r, y)
+        ctx.lineTo(x + w - r, y)
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+        ctx.lineTo(x + w, y + h - r)
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+        ctx.lineTo(x + r, y + h)
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+        ctx.lineTo(x, y + r)
+        ctx.quadraticCurveTo(x, y, x + r, y)
+        ctx.closePath()
+        ctx.stroke()
+      }
+    }, 300)
+
+    return () => clearInterval(id)
+  }, [isViewfinderOpen])
+
   const openViewfinder = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -190,6 +327,12 @@ export default function BarcodeScanner() {
             muted
             onClick={handleTap}
             className="h-full w-full object-cover"
+          />
+
+          {/* Canvas overlay for hitbox borders */}
+          <canvas
+            ref={canvasRef}
+            className="pointer-events-none absolute inset-0 h-full w-full"
           />
 
           <button

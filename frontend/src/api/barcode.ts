@@ -83,6 +83,26 @@ export async function detectBarcodeFromVideo(
   }
 }
 
+/**
+ * Detect all barcodes in a video frame, returning full DetectedBarcode objects
+ * with bounding boxes and corner points for overlay drawing.
+ */
+export async function detectBarcodesWithBounds(
+  video: HTMLVideoElement,
+): Promise<{ rawValue: string; boundingBox: DOMRectReadOnly }[]> {
+  const det = getDetector()
+  const bitmap = await createImageBitmap(video)
+  try {
+    const results = await det.detect(bitmap)
+    return results.map((r) => ({
+      rawValue: r.rawValue,
+      boundingBox: r.boundingBox,
+    }))
+  } finally {
+    bitmap.close()
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }

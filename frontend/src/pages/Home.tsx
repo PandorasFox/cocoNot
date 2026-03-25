@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import { listProducts, getProductByBarcode, type Product } from '../api/client'
+import { putProducts, putProduct } from '../api/cache'
 import ProductCard from '../components/ProductCard'
 import Disclaimer from '../components/Disclaimer'
 
@@ -27,6 +28,7 @@ export default function Home() {
       if (looksLikeSKU(q)) {
         try {
           const product = await getProductByBarcode(q)
+          putProduct(product)
           navigate(`/product/${product.id}`)
           return
         } catch {
@@ -39,8 +41,10 @@ export default function Home() {
         : filter === 'shrug' ? false
         : undefined
       const res = await listProducts({ q: q || undefined, coconut })
-      setProducts(res.products ?? [])
+      const prods = res.products ?? []
+      setProducts(prods)
       setTotal(res.total)
+      putProducts(prods)
     } catch {
       setProducts([])
       setTotal(0)
