@@ -191,3 +191,21 @@ docker compose up                 # start the web app
 
 ### Category Classification
 Products auto-classified based on OFF category tags: ice_cream, sorbet, gelato, frozen_yogurt, novelty (bars/sandwiches/popsicles), other.
+
+### Build Issues Resolved
+1. **Alpine + DuckDB incompatibility** — `go-duckdb` ships a static `libduckdb.a` compiled against glibc. Alpine uses musl, causing undefined symbol errors (`__memcpy_chk`, `__memset_chk`). Fixed by switching Dockerfile to Debian bookworm for both build and runtime stages.
+2. **Go version mismatch** — local Go was 1.26, Dockerfile had `golang:1.23`. Updated to `golang:1.26-bookworm`.
+3. **Parquet schema surprises** — OFF parquet file uses LIST types for columns we expected to be VARCHAR (e.g. `product_name`). Also `image_url` column doesn't exist (it's `image_front_url`). Fixed by dynamically discovering the schema with `DESCRIBE SELECT *` and building CAST expressions accordingly.
+4. **Docker Compose `--profile` not supported** — user's Docker Compose version doesn't have profiles. Removed the profiles constraint from the ingest service.
+
+### First Successful Ingestion
+- Parquet download: **4,236.8 MB** (~4.2 GB, larger than expected)
+- Query result: **11,134 products** matching US frozen dessert categories
+- Inserted: **11,123 products** (11 skipped due to missing code/name)
+- Time: ~50 seconds for download, seconds for query + upsert
+
+### Scope Expansion Discussion
+User wants to keep the **entire** OFF dataset (not just frozen desserts) — had an incident where handsoap contained coconut. Will widen the category filter in a future session to support barcode-scan-anything use case.
+
+### Initial Commit
+`42329fc` — full project scaffolding + working ingestion pipeline.
