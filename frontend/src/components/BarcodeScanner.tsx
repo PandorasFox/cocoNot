@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound } from '../api/cache'
-import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, getOcrMode, type OcrReadyState, type OcrResult } from '../api/ocr'
+import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type OcrResult } from '../api/ocr'
 import {
   drawUnifiedHitboxes, videoCoverTransform,
   HITBOX_RETAIN_MS, HITBOX_PADDING,
