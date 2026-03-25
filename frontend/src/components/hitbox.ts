@@ -34,7 +34,7 @@ export interface HitboxEntry {
   lastSeenAt: number
 }
 
-export const HITBOX_RETAIN_MS = 3000
+export const HITBOX_RETAIN_MS = 5000
 export const HITBOX_PADDING = 16
 
 /**

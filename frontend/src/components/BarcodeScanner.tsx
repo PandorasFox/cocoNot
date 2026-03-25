@@ -174,34 +174,37 @@ export default function BarcodeScanner() {
       }
 
       // ── Process OCR results (coconut matches only) ──
-      // Only replace OCR entries when we got a fresh result (not skipped/null)
+      // Don't wipe old OCR entries — let stale eviction handle it.
+      // Position-bucketed keys so nearby hits across frames share an entry,
+      // giving any lucky frame's coconut detection a full HITBOX_RETAIN_MS to live.
       if (ocrHits !== null) {
-        for (const key of hitboxMapRef.current.keys()) {
-          if (key.startsWith('ocr:')) hitboxMapRef.current.delete(key)
-        }
-
         frameCount++
         if (ocrHits.length > 0 && transform) {
           const { scale, offsetX, offsetY } = transform
           const coconutHits = ocrHits.filter(h => h.isCoconut)
-          for (let i = 0; i < coconutHits.length; i++) {
-            const hit = coconutHits[i]
+          for (const hit of coconutHits) {
             const x = hit.x * scale + offsetX - HITBOX_PADDING
             const y = hit.y * scale + offsetY - HITBOX_PADDING
             const w = hit.w * scale + HITBOX_PADDING * 2
             const h = hit.h * scale + HITBOX_PADDING * 2
-
-            hitboxMapRef.current.set(`ocr:${i}`, {
+            // Bucket by ~30px so the same word across frames shares a key
+            const bx = Math.round(x / 30)
+            const by = Math.round(y / 30)
+            hitboxMapRef.current.set(`ocr:${bx},${by}`, {
               x, y, w, h,
               status: 'coconut',
               name: hit.text,
               lastSeenAt: now,
             })
           }
-          setOcrDebug({ frames: frameCount, words: ocrHits.length, coconut: coconutHits.length })
-        } else {
-          setOcrDebug({ frames: frameCount, words: 0, coconut: 0 })
         }
+
+        // Debug: accumulated coconut count from live hitbox map
+        let liveCoconut = 0
+        for (const k of hitboxMapRef.current.keys()) {
+          if (k.startsWith('ocr:')) liveCoconut++
+        }
+        setOcrDebug({ frames: frameCount, words: ocrHits.length, coconut: liveCoconut })
       }
 
       // Self-heal OCR worker if it crashed
@@ -217,7 +220,7 @@ export default function BarcodeScanner() {
       }
 
       drawUnifiedHitboxes(ctx, dw, dh, hitboxMapRef.current)
-    }, 1000)
+    }, 2000)
 
     return () => clearInterval(id)
   }, [isViewfinderOpen])
@@ -231,8 +234,8 @@ export default function BarcodeScanner() {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: 'environment',
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
+          width: { ideal: 2560 },
+          height: { ideal: 1440 },
         },
       })
       streamRef.current = stream

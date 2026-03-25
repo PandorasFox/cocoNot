@@ -21,8 +21,8 @@ export interface Tile {
 
 // ── Constants ─────────────────────────────────────────────────
 
-export const POOL_SIZE = 1
-export const TILE_SIZE = 1600
+export const POOL_SIZE = 4
+export const TILE_SIZE = 960
 export const TILE_OVERLAP = 200
 
 // ── Worker pool state ─────────────────────────────────────────
@@ -172,9 +172,12 @@ export function createTiles(
   tileSize = TILE_SIZE,
   overlap = TILE_OVERLAP,
 ): Tile[] {
-  // Small enough for a single tile — preprocess and return as-is
+  // Skip manual preprocessing — Tesseract's internal Leptonica engine uses
+  // adaptive (local) thresholding which handles mixed font sizes far better
+  // than our global Otsu. Our binary threshold was nuking thin ingredient text.
+
+  // Small enough for a single tile — return as-is
   if (width <= tileSize && height <= tileSize) {
-    preprocessCanvas(source)
     return [{ canvas: source, offsetX: 0, offsetY: 0 }]
   }
 
@@ -188,7 +191,6 @@ export function createTiles(
       const th = Math.min(tileSize, height - ty)
       const tile = new OffscreenCanvas(tw, th)
       tile.getContext('2d')!.drawImage(source, tx, ty, tw, th, 0, 0, tw, th)
-      preprocessCanvas(tile)
       tiles.push({ canvas: tile, offsetX: tx, offsetY: ty })
     }
   }
