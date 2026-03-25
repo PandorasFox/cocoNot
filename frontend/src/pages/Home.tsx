@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { listProducts, getProductByBarcode, type Product } from '../api/client'
 import ProductCard from '../components/ProductCard'
 import Disclaimer from '../components/Disclaimer'
@@ -12,7 +12,8 @@ function looksLikeSKU(q: string): boolean {
 
 export default function Home() {
   const navigate = useNavigate()
-  const [query, setQuery] = useState('')
+  const [searchParams] = useSearchParams()
+  const [query, setQuery] = useState(searchParams.get('q') ?? '')
   const [filter, setFilter] = useState<Filter>('all')
   const [products, setProducts] = useState<Product[]>([])
   const [total, setTotal] = useState(0)

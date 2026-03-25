@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, Link } from 'react-router-dom'
 import { getProduct, type ProductDetail as ProductDetailType } from '../api/client'
+import { extractText } from '../api/parse'
 import StatusBadge from '../components/StatusBadge'
 import Disclaimer from '../components/Disclaimer'
 
@@ -29,6 +30,8 @@ export default function ProductDetail() {
     return <p className="p-4 text-gray-400">Loading...</p>
   }
 
+  const name = extractText(product.name)
+  const brand = extractText(product.brand)
   const offUrl = `https://world.openfoodfacts.org/product/${product.sku}`
 
   return (
@@ -39,18 +42,18 @@ export default function ProductDetail() {
 
       <div className="rounded-lg border border-gray-200 bg-white p-4">
         <div className="flex items-start gap-4">
-          {product.image_url && (
+          {product.image_url ? (
             <img
               src={product.image_url}
-              alt=""
+              alt={name}
               className="h-24 w-24 flex-shrink-0 rounded object-cover"
             />
-          )}
+          ) : null}
           <div className="min-w-0">
             <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
-              {product.brand}
+              {brand}
             </p>
-            <h1 className="mt-1 text-xl font-bold text-gray-900">{product.name}</h1>
+            <h1 className="mt-1 text-xl font-bold text-gray-900">{name}</h1>
             <p className="mt-1 text-sm text-gray-400">
               {product.category} &middot; SKU: {product.sku}
             </p>
@@ -90,7 +93,7 @@ export default function ProductDetail() {
                   </span>
                 </div>
                 <p className="mt-2 text-sm leading-relaxed text-gray-700">
-                  {s.ingredients_raw || '(no ingredients text)'}
+                  {extractText(s.ingredients_raw) || '(no ingredients text)'}
                 </p>
                 <p className="mt-1 text-xs text-gray-400">
                   Fetched {new Date(s.fetched_at).toLocaleDateString()}

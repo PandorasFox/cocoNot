@@ -234,3 +234,35 @@ Lots of good catches from testing the actual UI:
 7. **Localization fix** — the ROOT CAUSE: parquet stores `product_name` and `ingredients_text` as `LIST(STRUCT(lang, text))`. Old code used `array_to_string()` which dumped raw struct repr as `{'lang': main, 'text': Premium Ice Cream}`. Fixed with DuckDB `UNNEST` to extract `en`/`main` lang text properly.
 8. **Coconut detection** — now scans ALL language variants of ingredients (not just EN) by concatenating all `ingredients_text_*` columns
 9. **Duplicate ingredient sources** — added unique index on `(product_id, source_type)` with proper `ON CONFLICT DO UPDATE` upsert (migration 003)
+
+### Frontend text parser (workaround for existing data)
+DuckDB UNNEST fix didn't propagate on re-ingestion (0 updated, 11123 unchanged — upsert sees no coconut status change so "unchanged" counter fires even though brand/name DO get updated). Added `extractText()` frontend parser in `frontend/src/api/parse.ts` that extracts plain text from `{'lang': main, 'text': ...}` struct blobs at display time. Applied to product names, brands, and ingredients in ProductCard and ProductDetail.
+
+### Open issues for next session
+- **Images not rendering** — image column may not exist in the OFF parquet file with expected names. Added debug logging for image column discovery. Need to check what actual column names are available.
+- **Ingestion UNNEST** — DuckDB struct extraction may be silently falling through. Need to verify with sample row logging.
+
+## 2026-03-25 — Session 6: Barcode Scanner Feature
+
+### What Was Built
+Barcode scanning from the phone camera, entirely client-side:
+
+1. **`barcode-detector` npm package** — polyfill for the BarcodeDetector Web API, uses ZXing C++ WASM under the hood. Works on all browsers (native BarcodeDetector on Chrome, WASM fallback elsewhere including Safari/iOS).
+
+2. **`frontend/src/api/barcode.ts`** — utility module. Creates a `BarcodeDetector` instance targeting product barcode formats (EAN-13, UPC-A, EAN-8, UPC-E). Takes a `File` from the camera, converts to `ImageBitmap`, runs detection.
+
+3. **`frontend/src/components/BarcodeScanner.tsx`** — UI component:
+   - **Blue sticky footer button** on all pages with a barcode icon
+   - Hidden `<input type="file" accept="image/*" capture="environment">` — triggers the phone's rear camera for a single photo (no video stream)
+   - Processing overlay ("Reading barcode...") while WASM decodes
+   - On success: tries `getProductByBarcode(sku)` → navigates to product detail if found, otherwise navigates to `/?q=SKU` for text search fallback
+   - Error toast for "no barcode found" or decode failures
+
+4. **`App.tsx`** — added `<BarcodeScanner />` outside Routes so it's available on every page. Added `pb-20` wrapper so page content doesn't hide behind the sticky footer.
+
+5. **`Home.tsx`** — reads `?q=` URL search param to initialize the search input, so barcode scanner's fallback navigation (`/?q=SKU`) auto-triggers a search.
+
+### Architecture Notes
+- Single-frame capture approach (not webcam/video stream) — browser handles camera permissions via the file input
+- Barcode detection runs entirely in the browser (ZXing WASM) — no server round-trip for the image processing
+- The flow: camera → image file → ImageBitmap → BarcodeDetector.detect() → SKU string → API lookup → navigation

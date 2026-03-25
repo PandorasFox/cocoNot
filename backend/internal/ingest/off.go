@@ -143,6 +143,15 @@ func queryParquet(path string) ([]offProduct, error) {
 
 	log.Printf("Parquet schema sample: product_name=%s, brands=%s, ingredients_text=%s, categories_tags=%s",
 		colTypes["product_name"], colTypes["brands"], colTypes["ingredients_text"], colTypes["categories_tags"])
+	log.Printf("Image columns: image_url=%s, image_front_url=%s, image_front_small_url=%s",
+		colTypes["image_url"], colTypes["image_front_url"], colTypes["image_front_small_url"])
+
+	// Log all columns containing 'image' for discovery
+	for col, typ := range colTypes {
+		if strings.Contains(strings.ToLower(col), "image") {
+			log.Printf("  image col: %s = %s", col, typ)
+		}
+	}
 
 	isStructList := func(typ string) bool {
 		upper := strings.ToUpper(typ)
