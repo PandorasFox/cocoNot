@@ -216,7 +216,7 @@ export function tagCoconutWords(words: WordBox[]): OcrHit[] {
 }
 
 /** Flatten Tesseract result hierarchy into a flat word array. */
-export function flattenWords(blocks: Tesseract.Block[] | undefined): Tesseract.Word[] {
+export function flattenWords(blocks: Tesseract.Block[] | null | undefined): Tesseract.Word[] {
   const words: Tesseract.Word[] = []
   if (!blocks) return words
   for (const block of blocks) {
