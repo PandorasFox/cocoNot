@@ -25,12 +25,13 @@ const (
 )
 
 type offProduct struct {
-	Code           string
-	ProductName    string
-	Brands         string
-	IngredientsText string
-	ImageURL       string
-	CategoriesTags string // comma-separated or DuckDB list as string
+	Code            string
+	ProductName     string
+	Brands          string
+	IngredientsText string // preferred (EN), used for display + storage
+	IngredientsAll  string // all languages concatenated, used for coconut detection
+	ImageURL        string
+	CategoriesTags  string // comma-separated
 }
 
 // RunOFF downloads the Open Food Facts parquet file (if needed) and ingests
@@ -96,7 +97,7 @@ func downloadParquet(dest string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("User-Agent", "CoconutFree/1.0 (github.com/hecate/coconutfree)")
+	req.Header.Set("User-Agent", "CocoNot/1.0 (github.com/hecate/coconot)")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -163,12 +164,35 @@ func queryParquet(path string) ([]offProduct, error) {
 		}
 	}
 
+	// Prefer English ingredients text, fall back to generic
+	ingredientsExpr := "''"
+	for _, candidate := range []string{"ingredients_text_en", "ingredients_text"} {
+		if _, ok := colTypes[candidate]; ok {
+			ingredientsExpr = toStr(candidate)
+			break
+		}
+	}
+
+	// Build a concat of all available ingredients_text columns for coconut detection
+	// (catches coconut mentioned in any language)
+	var ingredientsCols []string
+	for col := range colTypes {
+		if strings.HasPrefix(col, "ingredients_text") {
+			ingredientsCols = append(ingredientsCols, toStr(col))
+		}
+	}
+	ingredientsAllExpr := "''"
+	if len(ingredientsCols) > 0 {
+		ingredientsAllExpr = "CONCAT_WS(' ', " + strings.Join(ingredientsCols, ", ") + ")"
+	}
+
 	query := fmt.Sprintf(`
 		SELECT
 			CAST(code AS VARCHAR) AS code,
 			%s AS product_name,
 			%s AS brands,
 			%s AS ingredients_text,
+			%s AS ingredients_all,
 			%s AS img_url,
 			%s AS cats
 		FROM '%s'
@@ -187,7 +211,7 @@ func queryParquet(path string) ([]offProduct, error) {
 			)
 			AND code IS NOT NULL
 			AND CAST(code AS VARCHAR) != ''
-	`, toStr("product_name"), toStr("brands"), toStr("ingredients_text"), imgExpr, toStr("categories_tags"), path)
+	`, toStr("product_name"), toStr("brands"), ingredientsExpr, ingredientsAllExpr, imgExpr, toStr("categories_tags"), path)
 
 	rows, err := db.Query(query)
 	if err != nil {
@@ -198,7 +222,7 @@ func queryParquet(path string) ([]offProduct, error) {
 	var products []offProduct
 	for rows.Next() {
 		var p offProduct
-		if err := rows.Scan(&p.Code, &p.ProductName, &p.Brands, &p.IngredientsText, &p.ImageURL, &p.CategoriesTags); err != nil {
+		if err := rows.Scan(&p.Code, &p.ProductName, &p.Brands, &p.IngredientsText, &p.IngredientsAll, &p.ImageURL, &p.CategoriesTags); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
 		products = append(products, p)
@@ -223,8 +247,9 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 		}
 
 		category := classifyCategory(p.CategoriesTags)
-		coconutFound := coconut.Detect(p.IngredientsText)
-		hasIngredients := strings.TrimSpace(p.IngredientsText) != ""
+		// Detect coconut across ALL language variants, not just the displayed EN text
+		coconutFound := coconut.Detect(p.IngredientsAll)
+		hasIngredients := strings.TrimSpace(p.IngredientsText) != "" || strings.TrimSpace(p.IngredientsAll) != ""
 
 		// Determine coconut status:
 		// - If ingredients present and coconut found -> true
@@ -270,8 +295,8 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 			// Add ingredient source
 			if hasIngredients {
 				_, err = pool.Exec(ctx, `
-					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, confidence, fetched_at, created_at)
-					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, 'medium', $6, $6)
+					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
+					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
 				`, uuid.New(), id, p.Code, p.IngredientsText, coconutFound, now)
 				if err != nil {
 					return stats, fmt.Errorf("inserting source for %s: %w", p.Code, err)
@@ -320,8 +345,8 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 			// Upsert ingredient source
 			if hasIngredients {
 				_, err = pool.Exec(ctx, `
-					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, confidence, fetched_at, created_at)
-					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, 'medium', $6, $6)
+					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
+					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
 					ON CONFLICT DO NOTHING
 				`, uuid.New(), existingID, p.Code, p.IngredientsText, coconutFound, now)
 				if err != nil {

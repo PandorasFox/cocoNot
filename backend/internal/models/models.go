@@ -26,7 +26,6 @@ type IngredientSource struct {
 	SourceURL      *string   `json:"source_url,omitempty"`
 	IngredientsRaw string    `json:"ingredients_raw"`
 	CoconutFound   bool      `json:"coconut_found"`
-	Confidence     string    `json:"confidence"` // high, medium, low
 	FetchedAt      time.Time `json:"fetched_at"`
 	CreatedAt      time.Time `json:"created_at"`
 }

@@ -84,7 +84,7 @@ func (q *Queries) GetProduct(ctx context.Context, id uuid.UUID) (*models.Product
 
 	// Sources
 	srcRows, err := q.pool.Query(ctx, `
-		SELECT id, product_id, source_type, source_url, ingredients_raw, coconut_found, confidence, fetched_at, created_at
+		SELECT id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at
 		FROM ingredient_sources WHERE product_id = $1 ORDER BY fetched_at DESC
 	`, id)
 	if err != nil {

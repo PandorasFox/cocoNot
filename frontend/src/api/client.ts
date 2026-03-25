@@ -18,7 +18,6 @@ export interface IngredientSource {
   source_url?: string
   ingredients_raw: string
   coconut_found: boolean
-  confidence: string
   fetched_at: string
   created_at: string
 }

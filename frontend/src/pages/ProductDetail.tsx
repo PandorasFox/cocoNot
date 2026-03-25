@@ -87,7 +87,7 @@ export default function ProductDetail() {
                   {s.ingredients_raw || '(no ingredients text)'}
                 </p>
                 <p className="mt-1 text-xs text-gray-400">
-                  Fetched {new Date(s.fetched_at).toLocaleDateString()} &middot; Confidence: {s.confidence}
+                  Fetched {new Date(s.fetched_at).toLocaleDateString()}
                 </p>
               </div>
             ))}

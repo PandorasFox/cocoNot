@@ -209,3 +209,11 @@ User wants to keep the **entire** OFF dataset (not just frozen desserts) — had
 
 ### Initial Commit
 `42329fc` — full project scaffolding + working ingestion pipeline.
+
+## 2026-03-25 — Session 4: Cleanup + Rename to CocoNot
+
+### User Feedback (all valid)
+1. **Confidence field was fake** — every source was just stamped "medium" with no real logic behind it. Removed entirely (migration 002, stripped from models/queries/ingest/frontend).
+2. **Disclaimer phrasing** — changed from "This tool helps filter — it is not a guarantee" to "Always check the label! Online sources are not always up to date."
+3. **Raw JSON/multilingual ingredient text** — OFF data has ingredients in multiple languages. Ingestion now prefers `ingredients_text_en` for display, but concatenates ALL `ingredients_text_*` columns for coconut detection (catches coconut in any language).
+4. **Rename to CocoNot** — all user-facing strings updated (nav, page title, log messages, user-agent). Go module path and DB credentials left as-is (internal plumbing).
