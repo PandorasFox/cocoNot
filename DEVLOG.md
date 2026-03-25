@@ -331,3 +331,16 @@ This viewfinder architecture is designed to support future passive scanning — 
 - localStorage cache of SKU → contains_coconut for zero-latency lookups
 - Canvas overlay on top of video for drawing bounding boxes
 - requestAnimationFrame loop for continuous detection
+
+## 2026-03-25 — Session 8: GitHub Actions for Docker Publishing
+
+### What Was Built
+Added `.github/workflows/docker-publish.yml` — GitHub Actions workflow to automatically build and push the Docker image to GitHub Container Registry on every push to `main`.
+
+### Workflow Details
+- **Trigger:** push to `main`
+- **Registry:** `ghcr.io/<owner>/coconutfree`
+- **Tags:** `latest` + `sha-<short-hash>` (e.g. `sha-d153b89`)
+- **Caching:** GitHub Actions cache (`type=gha`) for Docker layers — speeds up subsequent builds
+- **Auth:** uses `GITHUB_TOKEN` (no secrets to configure)
+- **Actions used:** checkout@v4, setup-buildx-action@v3, login-action@v3, metadata-action@v5, build-push-action@v6
