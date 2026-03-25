@@ -266,3 +266,36 @@ Barcode scanning from the phone camera, entirely client-side:
 - Single-frame capture approach (not webcam/video stream) — browser handles camera permissions via the file input
 - Barcode detection runs entirely in the browser (ZXing WASM) — no server round-trip for the image processing
 - The flow: camera → image file → ImageBitmap → BarcodeDetector.detect() → SKU string → API lookup → navigation
+
+## 2026-03-25 — Session 7: Cron Scheduler + Upsert Fixes + Reclassified UX
+
+### Periodic Ingestion Scheduler
+- New `backend/internal/ingest/scheduler.go` — `Scheduler` struct with `Start(ctx)` that runs ingestion immediately on startup, then repeats on a configurable interval (default 6h)
+- Uses `atomic.Bool` to prevent concurrent runs; logs errors without crashing the server
+- Wired into `main.go` — starts if `DATA_DIR` env var is set (presence of the offdata volume)
+- `docker-compose.yml` updated: `app` service now mounts `offdata:/data` and sets `DATA_DIR`/`INGEST_INTERVAL`
+- `ingest` service kept for manual one-off runs
+- Download function now uses `http.NewRequestWithContext` for proper graceful shutdown
+
+### Upsert Stats Fix
+- Added `refreshed` counter to `upsertStats` — products where data was re-written but coconut status stayed the same
+- `unchanged` now reserved for user-flagged products that are completely skipped
+- Log message now clearly reports: inserted / updated (status change) / refreshed / skipped (user-flagged)
+
+### Reclassified Page: Product Info
+- `StatusChange` model now includes `ProductName` and `ProductBrand`
+- `GetReclassified` query JOINs products table to populate them
+- Frontend shows brand + name on each changelog entry (no more anonymous "something changed" cards)
+
+### Image Rendering Safety Net
+- Applied `extractText()` to `product.image_url` in `ProductCard.tsx` and `ProductDetail.tsx`
+- If image URLs come through as struct blobs from the parquet, the frontend now extracts the clean URL
+- Added temporary sample-row logging in `off.go` to diagnose actual image URL shape from DuckDB
+
+### Next: verify
+- Run `docker compose up --build` and check ingestion logs for:
+  - Scheduler startup message
+  - Sample image URLs (clean vs struct blob)
+  - Stats breakdown
+- Check Reclassified page shows product names
+- Verify images render on product cards

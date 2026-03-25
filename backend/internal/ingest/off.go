@@ -46,7 +46,7 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string) error {
 	// Download if missing or stale (older than 24h)
 	if needsDownload(parquetPath) {
 		log.Println("Downloading Open Food Facts parquet file...")
-		if err := downloadParquet(parquetPath); err != nil {
+		if err := downloadParquet(ctx, parquetPath); err != nil {
 			return fmt.Errorf("downloading parquet: %w", err)
 		}
 		log.Println("Download complete")
@@ -69,7 +69,8 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string) error {
 		return fmt.Errorf("upserting products: %w", err)
 	}
 
-	log.Printf("Done: %d inserted, %d updated, %d unchanged", stats.inserted, stats.updated, stats.unchanged)
+	log.Printf("Done: %d inserted, %d updated (status change), %d refreshed, %d skipped (user-flagged)",
+		stats.inserted, stats.updated, stats.refreshed, stats.unchanged)
 	return nil
 }
 
@@ -81,7 +82,7 @@ func needsDownload(path string) bool {
 	return time.Since(info.ModTime()) > 24*time.Hour
 }
 
-func downloadParquet(dest string) error {
+func downloadParquet(ctx context.Context, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
 		return err
 	}
@@ -93,7 +94,7 @@ func downloadParquet(dest string) error {
 	}
 	defer out.Close()
 
-	req, err := http.NewRequest("GET", parquetURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", parquetURL, nil)
 	if err != nil {
 		return err
 	}
@@ -270,13 +271,22 @@ func queryParquet(path string) ([]offProduct, error) {
 		products = append(products, p)
 	}
 
+	// Debug: log first 5 image URLs to diagnose parquet extraction
+	for i, p := range products {
+		if i >= 5 {
+			break
+		}
+		log.Printf("  sample[%d] sku=%s img=%q", i, p.Code, p.ImageURL)
+	}
+
 	return products, rows.Err()
 }
 
 type upsertStats struct {
 	inserted  int
-	updated   int
-	unchanged int
+	updated   int // coconut status changed
+	refreshed int // data refreshed, coconut status same
+	unchanged int // user-flagged, completely skipped
 }
 
 func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct) (upsertStats, error) {
@@ -406,7 +416,7 @@ func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProdu
 			if statusChanged {
 				stats.updated++
 			} else {
-				stats.unchanged++
+				stats.refreshed++
 			}
 		}
 	}

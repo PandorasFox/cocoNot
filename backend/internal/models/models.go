@@ -47,6 +47,8 @@ type StatusChange struct {
 	NewContainsCoconut  *bool     `json:"new_contains_coconut"`
 	Reason              string    `json:"reason"`
 	ChangedAt           time.Time `json:"changed_at"`
+	ProductName         string    `json:"product_name" db:"product_name"`
+	ProductBrand        string    `json:"product_brand" db:"product_brand"`
 }
 
 // ProductDetail is the full view of a product with all its sources and flags.

@@ -3,11 +3,15 @@ services:
     build: .
     ports:
       - "8080:8080"
+    volumes:
+      - offdata:/data
     environment:
       DATABASE_URL: postgres://coconutfree:coconutfree@db:5432/coconutfree?sslmode=disable
       PORT: "8080"
       FRONTEND_DIR: /app/static
       MIGRATIONS_DIR: file:///app/migrations
+      DATA_DIR: /data
+      INGEST_INTERVAL: "6h"
     depends_on:
       db:
         condition: service_healthy

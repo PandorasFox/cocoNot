@@ -112,8 +112,11 @@ func (q *Queries) GetProduct(ctx context.Context, id uuid.UUID) (*models.Product
 
 	// History
 	histRows, err := q.pool.Query(ctx, `
-		SELECT id, product_id, old_contains_coconut, new_contains_coconut, reason, changed_at
-		FROM status_changelog WHERE product_id = $1 ORDER BY changed_at DESC
+		SELECT sc.id, sc.product_id, sc.old_contains_coconut, sc.new_contains_coconut, sc.reason, sc.changed_at,
+			p.name AS product_name, p.brand AS product_brand
+		FROM status_changelog sc
+		JOIN products p ON p.id = sc.product_id
+		WHERE sc.product_id = $1 ORDER BY sc.changed_at DESC
 	`, id)
 	if err != nil {
 		return nil, fmt.Errorf("getting history: %w", err)
@@ -144,8 +147,10 @@ func (q *Queries) GetProductByBarcode(ctx context.Context, sku string) (*models.
 
 func (q *Queries) GetReclassified(ctx context.Context, since time.Time, limit int) ([]models.StatusChange, error) {
 	rows, err := q.pool.Query(ctx, `
-		SELECT sc.id, sc.product_id, sc.old_contains_coconut, sc.new_contains_coconut, sc.reason, sc.changed_at
+		SELECT sc.id, sc.product_id, sc.old_contains_coconut, sc.new_contains_coconut, sc.reason, sc.changed_at,
+			p.name AS product_name, p.brand AS product_brand
 		FROM status_changelog sc
+		JOIN products p ON p.id = sc.product_id
 		WHERE sc.changed_at >= $1
 		ORDER BY sc.changed_at DESC
 		LIMIT $2

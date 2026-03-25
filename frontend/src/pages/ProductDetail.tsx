@@ -44,7 +44,7 @@ export default function ProductDetail() {
         <div className="flex items-start gap-4">
           {product.image_url ? (
             <img
-              src={product.image_url}
+              src={extractText(product.image_url)}
               alt={name}
               className="h-24 w-24 flex-shrink-0 rounded object-cover"
             />

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { getReclassified, type StatusChange } from '../api/client'
+import { extractText } from '../api/parse'
 import Disclaimer from '../components/Disclaimer'
 
 export default function Reclassified() {
@@ -36,7 +37,13 @@ export default function Reclassified() {
               to={`/product/${c.product_id}`}
               className="block rounded-lg border border-gray-200 bg-white p-4 transition-shadow hover:shadow-md"
             >
-              <div className="flex items-center justify-between">
+              <p className="text-xs font-medium uppercase tracking-wide text-gray-500">
+                {extractText(c.product_brand)}
+              </p>
+              <p className="font-semibold text-gray-900">
+                {extractText(c.product_name)}
+              </p>
+              <div className="mt-2 flex items-center justify-between">
                 <span className="text-sm text-gray-500">
                   {new Date(c.changed_at).toLocaleDateString()}
                 </span>

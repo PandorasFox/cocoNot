@@ -33,7 +33,7 @@ export default function ProductCard({ product }: ProductCardProps) {
         </div>
         {product.image_url ? (
           <img
-            src={product.image_url}
+            src={extractText(product.image_url)}
             alt={name}
             className="h-16 w-16 flex-shrink-0 rounded object-cover"
           />

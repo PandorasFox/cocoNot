@@ -55,6 +55,22 @@ func main() {
 		}
 	}
 
+	// Start periodic ingestion if DATA_DIR is set (volume mounted)
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir != "" {
+		interval := 6 * time.Hour
+		if v := os.Getenv("INGEST_INTERVAL"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil && d > 0 {
+				interval = d
+			} else {
+				log.Printf("Invalid INGEST_INTERVAL %q, using default %s", v, interval)
+			}
+		}
+		sched := ingest.NewScheduler(pool, dataDir, interval)
+		go sched.Start(ctx)
+		log.Printf("Ingest scheduler started (interval: %s)", interval)
+	}
+
 	queries := db.NewQueries(pool)
 	router := api.NewRouter(queries)
 

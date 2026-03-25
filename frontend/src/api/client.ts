@@ -29,6 +29,8 @@ export interface StatusChange {
   new_contains_coconut: boolean | null
   reason: string
   changed_at: string
+  product_name: string
+  product_brand: string
 }
 
 export interface ProductDetail extends Product {
