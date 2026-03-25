@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { getProductByBarcode, skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
 import { getStatuses, putSKULookupResults, putProduct, putNotFound } from '../api/cache'
-import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type OcrResult, type ScanRegion } from '../api/ocr'
+import { initOcr, recognizeWords, getOcrReadyState, onOcrReadyChange, type OcrReadyState, type ScanRegion } from '../api/ocr'
 import {
   drawUnifiedHitboxes, videoCoverTransform,
   HITBOX_RETAIN_MS, HITBOX_PADDING,
@@ -29,8 +29,9 @@ export default function BarcodeScanner() {
   const [ocrReady, setOcrReady] = useState<OcrReadyState>(getOcrReadyState)
   const [ocrDebug, setOcrDebug] = useState<{
     frames: number; words: number; coconut: number
-    lastMs: number; skipped: number
-  }>({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0 })
+    totalMs: number; captureMs: number; recognizeMs: number; postMs: number
+    queued: number
+  }>({ frames: 0, words: 0, coconut: 0, totalMs: 0, captureMs: 0, recognizeMs: 0, postMs: 0, queued: 0 })
 
   // Subscribe to OCR readiness changes
   useEffect(() => onOcrReadyChange(setOcrReady), [])
@@ -104,10 +105,9 @@ export default function BarcodeScanner() {
     if (!viewfinderMode) return
 
     hitboxMapRef.current.clear()
-    setOcrDebug({ frames: 0, words: 0, coconut: 0, lastMs: 0, skipped: 0 })
-    let ocrBusy = false
+    setOcrDebug({ frames: 0, words: 0, coconut: 0, totalMs: 0, captureMs: 0, recognizeMs: 0, postMs: 0, queued: 0 })
     let frameCount = 0
-    let skippedCount = 0
+    let inFlight = 0
     const mode = viewfinderMode
 
     if (mode === 'ocr') initOcr('standard')
@@ -175,31 +175,28 @@ export default function BarcodeScanner() {
 
       // ── OCR-only path (standard + fast) ──
       if (mode === 'ocr' || mode === 'ocr-fast') {
-        let ocrResult: OcrResult | null = null
-        if (ocrBusy) {
-          skippedCount++
-        } else {
-          ocrBusy = true
-          try {
-            const vw = video.videoWidth
-            const vh = video.videoHeight
-            const region: ScanRegion = {
-              x: Math.round(vw * 0.25),
-              y: Math.round(vh * 0.25),
-              w: Math.round(vw * 0.5),
-              h: Math.round(vh * 0.5),
-            }
-            ocrResult = await recognizeWords(video, region)
-          } finally {
-            ocrBusy = false
-          }
+        const vw = video.videoWidth
+        const vh = video.videoHeight
+        const region: ScanRegion = {
+          x: Math.round(vw * 0.25),
+          y: Math.round(vh * 0.25),
+          w: Math.round(vw * 0.5),
+          h: Math.round(vh * 0.5),
         }
 
-        if (ocrResult !== null) {
+        inFlight++
+        recognizeWords(video, region).then(ocrResult => {
+          inFlight--
+          if (!ocrResult) return
+
           frameCount++
-          const { hits: ocrHits, durationMs } = ocrResult
-          if (ocrHits.length > 0 && transform) {
-            const { scale, offsetX, offsetY } = transform
+          const { hits: ocrHits, totalMs, captureMs, recognizeMs, postMs } = ocrResult
+          const resultTransform = videoCoverTransform(
+            video.videoWidth, video.videoHeight,
+            canvas.width, canvas.height,
+          )
+          if (ocrHits.length > 0 && resultTransform) {
+            const { scale, offsetX, offsetY } = resultTransform
             const coconutHits = ocrHits.filter(h => h.isCoconut)
             for (const hit of coconutHits) {
               const x = hit.x * scale + offsetX - HITBOX_PADDING
@@ -212,7 +209,7 @@ export default function BarcodeScanner() {
                 x, y, w, h,
                 status: 'coconut',
                 name: hit.text,
-                lastSeenAt: now,
+                lastSeenAt: Date.now(),
               })
             }
           }
@@ -223,14 +220,9 @@ export default function BarcodeScanner() {
           }
           setOcrDebug({
             frames: frameCount, words: ocrHits.length, coconut: liveCoconut,
-            lastMs: durationMs, skipped: skippedCount,
+            totalMs, captureMs, recognizeMs, postMs, queued: inFlight,
           })
-        }
-
-        // Self-heal OCR worker if it crashed
-        if (ocrResult === null && getOcrReadyState() === 'loading') {
-          initOcr(mode === 'ocr-fast' ? 'fast' : 'standard')
-        }
+        }).catch(() => { inFlight-- })
       }
 
       // Evict stale entries
@@ -374,8 +366,9 @@ export default function BarcodeScanner() {
           {isOcrMode && (
             <div className="absolute top-4 left-4 rounded-lg bg-black/60 px-3 py-2 font-mono text-xs text-white backdrop-blur-sm">
               <div>OCR: {ocrReady === 'ready' ? 'ready' : ocrReady} ({viewfinderMode === 'ocr-fast' ? 'fast' : 'std'})</div>
-              <div>frames: {ocrDebug.frames} | skip: {ocrDebug.skipped}</div>
-              <div>{ocrDebug.lastMs}ms | words: {ocrDebug.words}</div>
+              <div>frames: {ocrDebug.frames} | queue: {ocrDebug.queued}</div>
+              <div>{ocrDebug.totalMs}ms = {ocrDebug.captureMs}cap + {ocrDebug.recognizeMs}rec + {ocrDebug.postMs}post</div>
+              <div>words: {ocrDebug.words}</div>
               {ocrDebug.coconut > 0 && (
                 <div className="font-bold text-red-400">COCONUT: {ocrDebug.coconut}</div>
               )}

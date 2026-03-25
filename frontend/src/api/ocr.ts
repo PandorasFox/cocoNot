@@ -15,7 +15,10 @@ export type OcrReadyState = 'loading' | 'ready' | 'error'
 
 export interface OcrResult {
   hits: OcrHit[]
-  durationMs: number
+  totalMs: number
+  captureMs: number    // canvas drawImage from video
+  recognizeMs: number  // worker.recognize()
+  postMs: number       // flattenWords + tagCoconutWords + remap
 }
 
 export interface ScanRegion {
@@ -36,6 +39,7 @@ const FAST_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123
 
 // ── Worker pool state ─────────────────────────────────────────
 
+let scheduler: Tesseract.Scheduler | null = null
 let workers: Tesseract.Worker[] = []
 let readyState: OcrReadyState = 'loading'
 let currentMode: OcrMode | null = null
@@ -91,6 +95,9 @@ export function initOcr(mode: OcrMode = 'standard'): void {
         )
       }
       if (thisGen !== generation) return
+      const sched = Tesseract.createScheduler()
+      for (const w of workers) sched.addWorker(w)
+      scheduler = sched
       setReadyState('ready')
     } catch {
       if (thisGen !== generation) return
@@ -103,9 +110,9 @@ export function initOcr(mode: OcrMode = 'standard'): void {
   })()
 }
 
-/** Tear down all workers (crash recovery). Next initOcr() recreates the pool. */
+/** Tear down all workers. Next initOcr() recreates the pool. */
 export function terminateOcr(): void {
-  for (const w of workers) w.terminate().catch(() => {})
+  if (scheduler) { scheduler.terminate(); scheduler = null }
   workers = []
   initPromise = null
   currentMode = null
@@ -273,14 +280,15 @@ export function flattenWords(blocks: Tesseract.Block[] | null | undefined): Tess
 
 /**
  * Run OCR on a video frame, optionally cropped to a scan region.
- * Uses a single worker — no tiling or deduplication needed.
+ * Dispatches through the scheduler — multiple calls can be in flight
+ * across different workers simultaneously.
  * Returns null if workers not ready.
  */
 export async function recognizeWords(
   video: HTMLVideoElement,
   region?: ScanRegion,
 ): Promise<OcrResult | null> {
-  if (workers.length === 0 || readyState !== 'ready') return null
+  if (!scheduler || readyState !== 'ready') return null
 
   const t0 = performance.now()
 
@@ -296,48 +304,31 @@ export async function recognizeWords(
   const frame = new OffscreenCanvas(rw, rh)
   frame.getContext('2d')!.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh)
 
-  let hits: OcrHit[]
-  try {
-    const result = await workers[0].recognize(frame, {}, { blocks: true })
-    const words = flattenWords(result.data.blocks)
-    hits = tagCoconutWords(words)
-    // Remap coordinates from crop-local back to full video frame
-    if (region) {
-      hits = hits.map(hit => ({
-        ...hit,
-        x: hit.x + rx,
-        y: hit.y + ry,
-      }))
-    }
-  } catch {
-    // Worker crashed — try next available worker
-    let recovered = false
-    for (let i = 1; i < workers.length; i++) {
-      try {
-        const result = await workers[i].recognize(frame, {}, { blocks: true })
-        const words = flattenWords(result.data.blocks)
-        hits = tagCoconutWords(words)
-        if (region) {
-          hits = hits.map(hit => ({
-            ...hit,
-            x: hit.x + rx,
-            y: hit.y + ry,
-          }))
-        }
-        recovered = true
-        break
-      } catch {
-        // This worker also crashed, try next
-      }
-    }
-    if (!recovered) {
-      terminateOcr()
-      return null
-    }
+  const tCapture = performance.now()
+
+  const result = await scheduler.addJob('recognize', frame, {}, { blocks: true })
+
+  const tRecognize = performance.now()
+
+  const words = flattenWords(result.data.blocks)
+  let hits = tagCoconutWords(words)
+  if (region) {
+    hits = hits.map(hit => ({
+      ...hit,
+      x: hit.x + rx,
+      y: hit.y + ry,
+    }))
   }
 
-  const durationMs = Math.round(performance.now() - t0)
-  return { hits: hits!, durationMs }
+  const tPost = performance.now()
+
+  return {
+    hits,
+    captureMs: Math.round(tCapture - t0),
+    recognizeMs: Math.round(tRecognize - tCapture),
+    postMs: Math.round(tPost - tRecognize),
+    totalMs: Math.round(tPost - t0),
+  }
 }
 
 /**
@@ -348,16 +339,9 @@ export async function recognizeWords(
 export async function recognizeImageSource(
   source: Tesseract.ImageLike,
 ): Promise<{ words: Tesseract.Word[]; hits: OcrHit[] } | null> {
-  if (workers.length === 0 || readyState !== 'ready') return null
+  if (!scheduler || readyState !== 'ready') return null
 
-  let result: Tesseract.RecognizeResult
-  try {
-    result = await workers[0].recognize(source, {}, { blocks: true })
-  } catch {
-    terminateOcr()
-    return null
-  }
-
+  const result = await scheduler.addJob('recognize', source, {}, { blocks: true })
   const words = flattenWords(result.data.blocks)
   const hits = tagCoconutWords(words)
   return { words, hits }

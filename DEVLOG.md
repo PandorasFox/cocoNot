@@ -1,5 +1,15 @@
 # CoconutFree - Dev Log
 
+## 2026-03-25 — Scheduler-based worker pool + OCR timing instrumentation
+
+**Problem:** `recognizeWords` was blocking on `workers[0]` — only one frame in flight at a time despite having 4 workers. With ~2500ms per recognition and 800ms tick interval, throughput was 1 result per 2500ms.
+
+**Changes:**
+- **`frontend/src/api/ocr.ts`**: Replaced direct `workers[0].recognize()` with `Tesseract.createScheduler()`. Workers are added to the scheduler in `initOcr`, jobs dispatched via `scheduler.addJob('recognize', ...)`. Scheduler handles greedy dispatch to idle workers. Added phase timing breakdown: `captureMs` (canvas drawImage), `recognizeMs` (Tesseract), `postMs` (flatten+tag+remap). Removed crash recovery — unnecessary complexity.
+- **`frontend/src/components/BarcodeScanner.tsx`**: Removed `ocrBusy` gate. OCR calls are now fire-and-forget — each tick submits a job, results processed in `.then()`. Multiple frames pipeline across workers. Debug pill shows timing breakdown (cap/rec/post) and queue depth.
+
+**Expected improvement:** With 4 workers pipelining, steady-state throughput should be ~1 result per 800ms tick (after initial 2500ms warmup) instead of 1 per 2500ms.
+
 ## 2026-03-25 — OCR Scan Region (center crop + visual overlay, remove tiling)
 
 **Problem:** OCR was 2-3s per frame processing the full 1920x1080 frame. Tiling machinery added complexity without benefit for a center-crop approach.
