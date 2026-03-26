@@ -66,7 +66,7 @@ func (s *Scheduler) setProgress(phase string, current, total int64) {
 }
 
 func (s *Scheduler) cachePath() string {
-	return filepath.Join(s.dataDir, "skus.json.gz")
+	return filepath.Join(s.dataDir, "skus.tsv.gz")
 }
 
 // Start begins the periodic ingestion loop.

@@ -44,7 +44,7 @@ func main() {
 			if err != nil {
 				log.Fatalf("Cache build failed: %v", err)
 			}
-			cachePath := filepath.Join(dataDir, "skus.json.gz")
+			cachePath := filepath.Join(dataDir, "skus.tsv.gz")
 			if err := c.WriteFile(cachePath); err != nil {
 				log.Fatalf("Cache write failed: %v", err)
 			}
@@ -67,18 +67,12 @@ func main() {
 	sched := ingest.NewScheduler(dataDir, interval)
 
 	// Pre-load cache from disk for instant readiness
-	cachePath := filepath.Join(dataDir, "skus.json.gz")
-	if c, err := cache.LoadFile(cachePath); err == nil && c.Count() > 0 {
+	cachePath := filepath.Join(dataDir, "skus.tsv.gz")
+	if c, err := cache.LoadFile(cachePath); err == nil {
 		sched.SetCache(c)
 		log.Printf("Pre-loaded cache from %s (%d entries)", cachePath, c.Count())
 	} else {
-		if err != nil {
-			log.Printf("Cache at %s unreadable (will rebuild): %v", cachePath, err)
-			// Remove stale/corrupt cache so NeedsIngest sees it as missing
-			os.Remove(cachePath)
-		} else {
-			log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
-		}
+		log.Printf("No cache at %s, will build on first ingest", cachePath)
 	}
 
 	go sched.Start(ctx)

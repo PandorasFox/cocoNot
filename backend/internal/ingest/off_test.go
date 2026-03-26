@@ -239,7 +239,7 @@ func TestCacheBuild_FromParquet(t *testing.T) {
 	}
 
 	// Write and reload cache to verify round-trip
-	cachePath := filepath.Join(dir, "skus.json.gz")
+	cachePath := filepath.Join(dir, "skus.tsv.gz")
 
 	// Import cache package indirectly — just verify the prepared data is clean
 	_ = cachePath

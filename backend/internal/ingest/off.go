@@ -45,7 +45,7 @@ func NeedsIngest(dataDir string) bool {
 		dataDir = defaultDir
 	}
 	parquetPath := filepath.Join(dataDir, "food.parquet")
-	cachePath := filepath.Join(dataDir, "skus.json.gz")
+	cachePath := filepath.Join(dataDir, "skus.tsv.gz")
 
 	// No parquet at all → need to download + ingest
 	pInfo, err := os.Stat(parquetPath)
