@@ -18,6 +18,8 @@ func NewRouter(cacheFunc func() *cache.Cache, readyFunc func() bool, progressFun
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Compress(5))
 
+	r.Get("/privacy", servePrivacyPolicy)
+
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/health", func(w http.ResponseWriter, _ *http.Request) {
 			resp := map[string]any{"ready": readyFunc()}

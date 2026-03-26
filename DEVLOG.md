@@ -851,3 +851,11 @@ Running barcode + OCR in parallel wastes cycles — barcode detection is noise w
 - `frontend/src/api/ocr.ts` — OcrMode type, mode-aware initOcr with generation counter, fast lang + whitelist
 - `frontend/src/components/BarcodeScanner.tsx` — ViewfinderMode, three-button footer, mode-branched detection loop
 - `frontend/src/components/SplashScreen.tsx` — removed eager initOcr, simplified dismiss logic
+
+## 2026-03-26 — Privacy policy page
+
+Added a server-rendered privacy policy at `/privacy` for App Store compliance. Served directly from the Go backend as static HTML (no JS required), so it's accessible to reviewers and crawlers.
+
+### Files Changed
+- `backend/internal/api/privacy.go` — new file, serves self-contained HTML privacy policy
+- `backend/internal/api/routes.go` — added `GET /privacy` route before API routes
