@@ -28,19 +28,18 @@ export interface ScanRegion {
   h: number
 }
 
-export type OcrMode = 'standard' | 'fast'
+export type OcrMode = 'standard'
 
 // ── Constants ─────────────────────────────────────────────────
 
-export const POOL_SIZE = 4
+export const POOL_SIZE = 2
 
-const FAST_LANG_PATH = 'https://tessdata.projectnaptha.com/4.0.0_fast'
-const FAST_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ,():.-/%'
+const CHAR_WHITELIST = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 ,():.-/%'
 
 // ── Worker pool state ─────────────────────────────────────────
 
-let scheduler: Tesseract.Scheduler | null = null
 let workers: Tesseract.Worker[] = []
+let workerBusy: boolean[] = []
 let readyState: OcrReadyState = 'loading'
 let currentMode: OcrMode | null = null
 let generation = 0
@@ -78,10 +77,9 @@ export function initOcr(mode: OcrMode = 'standard'): void {
   initPromise = (async () => {
     try {
       setReadyState('loading')
-      const opts = mode === 'fast' ? { langPath: FAST_LANG_PATH } : undefined
       const pool = await Promise.all(
         Array.from({ length: POOL_SIZE }, () =>
-          Tesseract.createWorker('eng', undefined, opts),
+          Tesseract.createWorker('eng'),
         ),
       )
       if (thisGen !== generation) {
@@ -89,15 +87,11 @@ export function initOcr(mode: OcrMode = 'standard'): void {
         return
       }
       workers = pool
-      if (mode === 'fast') {
-        await Promise.all(
-          workers.map(w => w.setParameters({ tessedit_char_whitelist: FAST_WHITELIST })),
-        )
-      }
+      await Promise.all(
+        workers.map(w => w.setParameters({ tessedit_char_whitelist: CHAR_WHITELIST })),
+      )
       if (thisGen !== generation) return
-      const sched = Tesseract.createScheduler()
-      for (const w of workers) sched.addWorker(w)
-      scheduler = sched
+      workerBusy = new Array(workers.length).fill(false)
       setReadyState('ready')
     } catch {
       if (thisGen !== generation) return
@@ -112,11 +106,17 @@ export function initOcr(mode: OcrMode = 'standard'): void {
 
 /** Tear down all workers. Next initOcr() recreates the pool. */
 export function terminateOcr(): void {
-  if (scheduler) { scheduler.terminate(); scheduler = null }
+  for (const w of workers) w.terminate().catch(() => {})
   workers = []
+  workerBusy = []
   initPromise = null
   currentMode = null
   setReadyState('loading')
+}
+
+/** Number of workers currently processing a frame. */
+export function getInFlightCount(): number {
+  return workerBusy.filter(Boolean).length
 }
 
 // ── Preprocessing ──────────────────────────────────────────────
@@ -280,55 +280,110 @@ export function flattenWords(blocks: Tesseract.Block[] | null | undefined): Tess
 
 /**
  * Run OCR on a video frame, optionally cropped to a scan region.
- * Dispatches through the scheduler — multiple calls can be in flight
- * across different workers simultaneously.
- * Returns null if workers not ready.
+ * Claims an idle worker from the pool. Returns null immediately if
+ * all workers are busy (frame drop) or pool not ready.
  */
 export async function recognizeWords(
   video: HTMLVideoElement,
   region?: ScanRegion,
 ): Promise<OcrResult | null> {
-  if (!scheduler || readyState !== 'ready') return null
+  if (readyState !== 'ready') return null
 
-  const t0 = performance.now()
+  // Claim an idle worker — drop frame if all busy
+  const wi = workerBusy.indexOf(false)
+  if (wi === -1) return null
+  workerBusy[wi] = true
 
-  const vw = video.videoWidth
-  const vh = video.videoHeight
-  if (!vw || !vh) return null
+  try {
+    const t0 = performance.now()
 
-  const rx = region?.x ?? 0
-  const ry = region?.y ?? 0
-  const rw = region?.w ?? vw
-  const rh = region?.h ?? vh
+    const vw = video.videoWidth
+    const vh = video.videoHeight
+    if (!vw || !vh) return null
 
-  const frame = new OffscreenCanvas(rw, rh)
-  frame.getContext('2d')!.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh)
+    const rx = region?.x ?? 0
+    const ry = region?.y ?? 0
+    const rw = region?.w ?? vw
+    const rh = region?.h ?? vh
 
-  const tCapture = performance.now()
+    const frame = new OffscreenCanvas(rw, rh)
+    frame.getContext('2d')!.drawImage(video, rx, ry, rw, rh, 0, 0, rw, rh)
 
-  const result = await scheduler.addJob('recognize', frame, {}, { blocks: true })
+    const tCapture = performance.now()
 
-  const tRecognize = performance.now()
+    const result = await workers[wi].recognize(frame, {}, { blocks: true })
 
-  const words = flattenWords(result.data.blocks)
-  let hits = tagCoconutWords(words)
-  if (region) {
-    hits = hits.map(hit => ({
-      ...hit,
-      x: hit.x + rx,
-      y: hit.y + ry,
-    }))
+    const tRecognize = performance.now()
+
+    const words = flattenWords(result.data.blocks)
+    let hits = tagCoconutWords(words)
+    if (region) {
+      hits = hits.map(hit => ({
+        ...hit,
+        x: hit.x + rx,
+        y: hit.y + ry,
+      }))
+    }
+
+    const tPost = performance.now()
+
+    return {
+      hits,
+      captureMs: Math.round(tCapture - t0),
+      recognizeMs: Math.round(tRecognize - tCapture),
+      postMs: Math.round(tPost - tRecognize),
+      totalMs: Math.round(tPost - t0),
+    }
+  } finally {
+    workerBusy[wi] = false
+  }
+}
+
+/**
+ * Process pre-captured frames through the worker pool (work-stealing).
+ * Calls onResult for each completed frame. Returns when all frames are done.
+ */
+export async function recognizeBurst(
+  frames: OffscreenCanvas[],
+  regionOffset: { x: number; y: number },
+  onResult: (result: OcrResult, frameIndex: number) => void,
+): Promise<void> {
+  if (readyState !== 'ready' || workers.length === 0) return
+
+  let nextFrame = 0
+
+  async function processNext(wi: number): Promise<void> {
+    while (nextFrame < frames.length) {
+      const fi = nextFrame++
+      workerBusy[wi] = true
+      try {
+        const t0 = performance.now()
+        const result = await workers[wi].recognize(frames[fi], {}, { blocks: true })
+        const tRecognize = performance.now()
+        const words = flattenWords(result.data.blocks)
+        let hits = tagCoconutWords(words)
+        if (regionOffset.x || regionOffset.y) {
+          hits = hits.map(hit => ({
+            ...hit,
+            x: hit.x + regionOffset.x,
+            y: hit.y + regionOffset.y,
+          }))
+        }
+        const tPost = performance.now()
+        onResult({
+          hits,
+          captureMs: 0,
+          recognizeMs: Math.round(tRecognize - t0),
+          postMs: Math.round(tPost - tRecognize),
+          totalMs: Math.round(tPost - t0),
+        }, fi)
+      } finally {
+        workerBusy[wi] = false
+      }
+    }
   }
 
-  const tPost = performance.now()
-
-  return {
-    hits,
-    captureMs: Math.round(tCapture - t0),
-    recognizeMs: Math.round(tRecognize - tCapture),
-    postMs: Math.round(tPost - tRecognize),
-    totalMs: Math.round(tPost - t0),
-  }
+  await Promise.all(workers.map((_, wi) => processNext(wi)))
 }
 
 /**
@@ -339,10 +394,18 @@ export async function recognizeWords(
 export async function recognizeImageSource(
   source: Tesseract.ImageLike,
 ): Promise<{ words: Tesseract.Word[]; hits: OcrHit[] } | null> {
-  if (!scheduler || readyState !== 'ready') return null
+  if (readyState !== 'ready') return null
 
-  const result = await scheduler.addJob('recognize', source, {}, { blocks: true })
-  const words = flattenWords(result.data.blocks)
-  const hits = tagCoconutWords(words)
-  return { words, hits }
+  const wi = workerBusy.indexOf(false)
+  if (wi === -1) return null
+  workerBusy[wi] = true
+
+  try {
+    const result = await workers[wi].recognize(source, {}, { blocks: true })
+    const words = flattenWords(result.data.blocks)
+    const hits = tagCoconutWords(words)
+    return { words, hits }
+  } finally {
+    workerBusy[wi] = false
+  }
 }

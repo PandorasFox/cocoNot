@@ -1,0 +1,18 @@
+{
+	local_certs
+	auto_https disable_redirects
+}
+
+:443 {
+	tls internal {
+		on_demand
+	}
+
+	handle /api/* {
+		reverse_proxy host.docker.internal:8080
+	}
+
+	handle {
+		reverse_proxy host.docker.internal:5173
+	}
+}

@@ -25,6 +25,34 @@ services:
       MIGRATIONS_DIR: file:///app/migrations
       DATA_DIR: /data
 
+  # Local HTTPS reverse proxy for phone testing.
+  # Proxies to Vite (5173) and Go backend (8080) running on the host.
+  #
+  # Usage:
+  #   1. Start your dev servers normally (npm run dev + go run)
+  #   2. docker compose up caddy
+  #   3. Open https://<your-lan-ip> on your phone
+  #
+  # First time on a phone: visit https://<your-lan-ip> and accept the
+  # self-signed cert warning, or install the Caddy root CA from
+  #   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .
+  # then add root.crt to your phone's trusted certificates.
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "443:443"
+      - "80:80"
+    volumes:
+      - ./Caddyfile.dev:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    profiles:
+      - dev
+
 volumes:
   pgdata:
   offdata:
+  caddy_data:
+  caddy_config:

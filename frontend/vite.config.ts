@@ -58,6 +58,9 @@ export default defineConfig({
     }),
   ],
   server: {
+    // Allow any Host header so Caddy reverse proxy and LAN access work.
+    // Only affects the dev server — no impact on production builds.
+    allowedHosts: true,
     proxy: {
       '/api': 'http://localhost:8080',
     },

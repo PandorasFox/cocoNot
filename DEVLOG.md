@@ -1,5 +1,45 @@
 # CoconutFree - Dev Log
 
+## 2026-03-25 — Tap-to-burst OCR with 4K capture + downscale
+
+**Problem:** Continuous OCR polling (every 1333ms) burned CPU/battery and caused thermal throttling on phones. Recognition at full crop resolution (~540×1080) took 4-6s per frame.
+
+**Solution:** Replaced continuous polling with tap-to-burst: user taps to trigger a 5-frame burst capture, processed through the 2-worker pool. Added 4K upscale for capture (1080p preview → 4K burst → back to 1080p) with 2× downscale before sending to Tesseract, and overlapping hitbox merging.
+
+**Changes:**
+- **`ocr.ts`**: Added `recognizeBurst()` — work-stealing pattern across the worker pool, calls `onResult` per frame as results complete.
+- **`BarcodeScanner.tsx`**: Removed continuous OCR interval. Added tap-to-burst handler: switches camera to 4K via `applyConstraints`, captures 5 frames via `requestVideoFrameCallback`, downscales 2× before OCR, switches back to 1080p. Coordinate pipeline: half-size OCR coords → ×2 to capture space → ×(preview/capture) to 1080p → display transform. Overlapping coconut hitboxes merge (min lower corners, max upper corners). Viewfinder overlay at 50%. Hint text: "Tap to scan ingredients".
+- **Debug pill**: Shows burst progress (e.g., "burst: 3/5").
+
+**Perf:** ~146K pixels per frame (vs ~583K before downscale). With 2 workers and 5 frames, full burst completes in ~5-8s. Zero idle CPU between bursts.
+
+## 2026-03-25 — Local Caddy HTTPS reverse proxy for phone testing
+
+**Problem:** Camera APIs (getUserMedia, BarcodeDetector) require a secure context (HTTPS). Testing on a phone connected to the same LAN meant either doing full deploys or manually generating self-signed certs. Neither is practical for rapid iteration.
+
+**Solution:** Added a Caddy reverse proxy service to docker-compose.yml behind a `dev` profile. Caddy uses its built-in internal CA (`tls internal` + `local_certs`) to automatically issue self-signed certs for any hostname, including raw LAN IPs.
+
+**Changes:**
+- **`Caddyfile.dev`** (new): Listens on `:443`, routes `/api/*` to the Go backend on `host.docker.internal:8080` and everything else to Vite on `host.docker.internal:5173`. Uses `local_certs` + `tls internal` for automatic HTTPS.
+- **`docker-compose.yml`**: Added `caddy` service (image `caddy:2-alpine`) under the `dev` profile. Maps ports 443 and 80. Uses `extra_hosts` to resolve `host.docker.internal` on Linux. Persists Caddy's cert data in named volumes.
+- **`frontend/package.json`**: Added `dev:lan` script (`vite --host`) to bind Vite to all interfaces so it accepts connections from the Docker container.
+- **`frontend/vite.config.ts`**: Added `allowedHosts: 'all'` to the dev server config so Vite accepts requests with any Host header (needed for LAN IP access through Caddy).
+
+**Usage:**
+1. `cd frontend && npm run dev:lan` (Vite on 0.0.0.0:5173)
+2. Start Go backend on :8080
+3. `docker compose --profile dev up caddy`
+4. On phone: open `https://<mac-lan-ip>`
+5. Accept the self-signed cert warning (or install the Caddy root CA for persistent trust)
+
+## 2026-03-25 — Bounded worker queue + viewport-aware crop fix
+
+**Problem 1 (queue backup):** Tesseract scheduler queued jobs without bound. With 800ms ticks and ~2500ms recognition, the queue grew indefinitely. Replaced with a custom bounded queue: `recognizeWords` claims an idle worker directly (`workerBusy[]` array), returns null immediately when all workers are busy (frame drop). Queue depth is always <= POOL_SIZE.
+
+**Problem 2 (crop mismatch):** Scan region was center 50% of the *video frame* (1920x1080), but `object-cover` on a portrait phone shows only a fraction of the video width. The crop extended well beyond the visible screen area — OCR was processing invisible pixels and producing hits at screen edges. Fixed by computing the visible video rect from `videoCoverTransform` and taking center 50% of *that*. Crop now matches the CSS overlay exactly.
+
+**Instrumentation:** Debug pill shows timing breakdown (cap/rec/post), in-flight worker count, drop count, and crop dimensions for verification.
+
 ## 2026-03-25 — Scheduler-based worker pool + OCR timing instrumentation
 
 **Problem:** `recognizeWords` was blocking on `workers[0]` — only one frame in flight at a time despite having 4 workers. With ~2500ms per recognition and 800ms tick interval, throughput was 1 result per 2500ms.
