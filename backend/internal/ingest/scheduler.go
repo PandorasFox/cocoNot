@@ -7,21 +7,18 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
-
 	"github.com/hecate/coconutfree/internal/cache"
 )
 
 // Progress tracks the current ingestion phase and progress.
 type Progress struct {
-	Phase   string `json:"phase"`   // "idle" | "downloading" | "querying" | "upserting" | "caching"
-	Current int64  `json:"current"` // bytes downloaded OR products upserted
-	Total   int64  `json:"total"`   // Content-Length OR product count
+	Phase   string `json:"phase"`   // "idle" | "downloading" | "querying" | "caching"
+	Current int64  `json:"current"`
+	Total   int64  `json:"total"`
 }
 
 // Scheduler runs periodic ingestion in the background.
 type Scheduler struct {
-	pool     *pgxpool.Pool
 	dataDir  string
 	interval time.Duration
 	running  atomic.Bool
@@ -31,9 +28,8 @@ type Scheduler struct {
 }
 
 // NewScheduler creates a scheduler that runs ingestion every interval.
-func NewScheduler(pool *pgxpool.Pool, dataDir string, interval time.Duration) *Scheduler {
+func NewScheduler(dataDir string, interval time.Duration) *Scheduler {
 	s := &Scheduler{
-		pool:     pool,
 		dataDir:  dataDir,
 		interval: interval,
 	}
@@ -41,7 +37,7 @@ func NewScheduler(pool *pgxpool.Pool, dataDir string, interval time.Duration) *S
 	return s
 }
 
-// Ready reports whether the first ingestion has completed (or cache was pre-loaded).
+// Ready reports whether the cache is available.
 func (s *Scheduler) Ready() bool {
 	return s.ready.Load()
 }
@@ -73,9 +69,7 @@ func (s *Scheduler) cachePath() string {
 	return filepath.Join(s.dataDir, "skus.json.gz")
 }
 
-// Start begins the periodic ingestion loop. Runs one ingestion immediately
-// on startup, then repeats on the configured interval. Blocks until ctx is
-// cancelled.
+// Start begins the periodic ingestion loop.
 func (s *Scheduler) Start(ctx context.Context) {
 	s.runOnce(ctx)
 	s.ready.Store(true)
@@ -109,7 +103,6 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	log.Println("Scheduled ingestion starting...")
 	start := time.Now()
 
-	// Phase 1: Download + query + prepare
 	prepared, err := RunOFF(ctx, s.dataDir, s.setProgress)
 	if err != nil {
 		log.Printf("Scheduled ingestion failed: %v", err)
@@ -117,7 +110,6 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 		return
 	}
 
-	// Phase 2: Build and write cache
 	s.setProgress("caching", 0, int64(len(prepared)))
 	cacheProducts := make([]cache.PreparedProduct, len(prepared))
 	for i, p := range prepared {
@@ -130,20 +122,15 @@ func (s *Scheduler) runOnce(ctx context.Context) {
 	c, err := cache.Build(cacheProducts)
 	if err != nil {
 		log.Printf("Cache build failed: %v", err)
-	} else {
-		if err := c.WriteFile(s.cachePath()); err != nil {
-			log.Printf("Cache write failed: %v", err)
-		} else {
-			s.cache.Store(c)
-			log.Printf("Cache written: %s", s.cachePath())
-		}
-	}
-
-	// Phase 3: Upsert into PostgreSQL
-	if err := UpsertProducts(ctx, s.pool, prepared, s.setProgress); err != nil {
-		log.Printf("Database upsert failed: %v", err)
 		s.setProgress("idle", 0, 0)
 		return
+	}
+
+	if err := c.WriteFile(s.cachePath()); err != nil {
+		log.Printf("Cache write failed: %v", err)
+	} else {
+		s.cache.Store(c)
+		log.Printf("Cache written: %s", s.cachePath())
 	}
 
 	s.setProgress("idle", 0, 0)

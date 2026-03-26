@@ -1,8 +1,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { getProductByBarcode, skuLookup } from '../api/client'
+import { skuLookup } from '../api/client'
 import { detectBarcodeBurst, detectBarcodesWithBounds } from '../api/barcode'
-import { getStatuses, putSKULookupResults, putProduct, putNotFound } from '../api/cache'
+import { getStatuses, putSKULookupResults } from '../api/cache'
 import {
   drawUnifiedHitboxes, videoCoverTransform,
   HITBOX_RETAIN_MS, HITBOX_PADDING,
@@ -16,7 +15,6 @@ type ScanState =
   | { status: 'error'; message: string; inViewfinder: boolean }
 
 export default function BarcodeScanner() {
-  const navigate = useNavigate()
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -35,24 +33,6 @@ export default function BarcodeScanner() {
   // Clean up on unmount
   useEffect(() => stopStream, [stopStream])
 
-  // Navigate after a successful scan
-  const handleSKU = useCallback(
-    async (sku: string) => {
-      try {
-        const product = await getProductByBarcode(sku)
-        putProduct(product)
-        stopStream()
-        setState({ status: 'idle' })
-        navigate(`/product/${product.id}`)
-      } catch {
-        putNotFound(sku)
-        stopStream()
-        setState({ status: 'idle' })
-        navigate(`/?q=${encodeURIComponent(sku)}`)
-      }
-    },
-    [navigate, stopStream],
-  )
 
   // ── Viewfinder state helpers ─────────────────────────────────
 
@@ -204,7 +184,11 @@ export default function BarcodeScanner() {
         })
         return
       }
-      await handleSKU(sku)
+      // Look up and cache — the viewfinder loop will draw the hitbox
+      await skuLookup([sku])
+        .then((res) => putSKULookupResults(res.results, [sku]))
+        .catch(() => {})
+      setState({ status: 'viewfinder' })
     } catch {
       setState({
         status: 'error',
@@ -212,7 +196,7 @@ export default function BarcodeScanner() {
         inViewfinder: true,
       })
     }
-  }, [state.status, handleSKU])
+  }, [state.status])
 
   // ── Shared ──────────────────────────────────────────────────
 

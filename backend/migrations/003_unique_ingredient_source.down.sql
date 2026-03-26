@@ -1,1 +1,0 @@
-DROP INDEX IF EXISTS idx_ingredient_sources_product_source;

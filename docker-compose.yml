@@ -5,24 +5,19 @@ services:
       - "8080:8080"
     volumes:
       - offdata:/data
-      - pgdata:/var/lib/postgresql/data
     environment:
       PORT: "8080"
       FRONTEND_DIR: /app/static
-      MIGRATIONS_DIR: file:///app/migrations
       DATA_DIR: /data
       INGEST_INTERVAL: "6h"
 
   # Run with: docker compose run --rm ingest
-  # Won't start with `docker compose up app` — only runs when targeted directly
   ingest:
     build: .
     command: ["./coconutfree", "ingest"]
     volumes:
       - offdata:/data
-      - pgdata:/var/lib/postgresql/data
     environment:
-      MIGRATIONS_DIR: file:///app/migrations
       DATA_DIR: /data
 
   # Local HTTPS reverse proxy for phone testing.
@@ -32,11 +27,6 @@ services:
   #   1. Start your dev servers normally (npm run dev + go run)
   #   2. docker compose up caddy
   #   3. Open https://<your-lan-ip> on your phone
-  #
-  # First time on a phone: visit https://<your-lan-ip> and accept the
-  # self-signed cert warning, or install the Caddy root CA from
-  #   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt .
-  # then add root.crt to your phone's trusted certificates.
   caddy:
     image: caddy:2-alpine
     ports:
@@ -52,7 +42,6 @@ services:
       - dev
 
 volumes:
-  pgdata:
   offdata:
   caddy_data:
   caddy_config:

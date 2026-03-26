@@ -1,6 +1,3 @@
-import type { Product } from './client'
-import { extractText } from './parse'
-
 export interface CachedSKU {
   sku: string
   status: 'coconut' | 'clean' | 'not_found'
@@ -85,42 +82,6 @@ function productToStatus(
   return containsCoconut === true ? 'coconut' : 'clean'
 }
 
-export async function putProduct(product: Product): Promise<void> {
-  const { store, done } = await tx('readwrite')
-  store.put({
-    sku: product.sku,
-    status: productToStatus(product.contains_coconut),
-    name: extractText(product.name),
-    cachedAt: Date.now(),
-  } satisfies CachedSKU)
-  await done
-}
-
-export async function putProducts(products: Product[]): Promise<void> {
-  if (products.length === 0) return
-  const { store, done } = await tx('readwrite')
-  const now = Date.now()
-  for (const p of products) {
-    store.put({
-      sku: p.sku,
-      status: productToStatus(p.contains_coconut),
-      name: extractText(p.name),
-      cachedAt: now,
-    } satisfies CachedSKU)
-  }
-  await done
-}
-
-export async function putNotFound(sku: string): Promise<void> {
-  const { store, done } = await tx('readwrite')
-  store.put({
-    sku,
-    status: 'not_found',
-    cachedAt: Date.now(),
-  } satisfies CachedSKU)
-  await done
-}
-
 export async function putSKULookupResults(
   results: Record<string, { name: string; contains_coconut: boolean | null }>,
   requestedSkus: string[],
@@ -132,7 +93,7 @@ export async function putSKULookupResults(
     store.put({
       sku,
       status: productToStatus(r.contains_coconut),
-      name: extractText(r.name),
+      name: r.name,
       cachedAt: now,
     } satisfies CachedSKU)
   }
@@ -144,23 +105,6 @@ export async function putSKULookupResults(
         cachedAt: now,
       } satisfies CachedSKU)
     }
-  }
-  await done
-}
-
-export async function putDump(
-  products: { sku: string; name: string; contains_coconut: boolean | null }[],
-): Promise<void> {
-  if (products.length === 0) return
-  const { store, done } = await tx('readwrite')
-  const now = Date.now()
-  for (const p of products) {
-    store.put({
-      sku: p.sku,
-      status: productToStatus(p.contains_coconut),
-      name: extractText(p.name),
-      cachedAt: now,
-    } satisfies CachedSKU)
   }
   await done
 }

@@ -7,12 +7,11 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/hecate/coconutfree/internal/cache"
-	"github.com/hecate/coconutfree/internal/db"
 	"github.com/hecate/coconutfree/internal/ingest"
 )
 
-func NewRouter(queries *db.Queries, cacheFunc func() *cache.Cache, readyFunc func() bool, progressFunc func() *ingest.Progress) *chi.Mux {
-	h := NewHandler(queries, cacheFunc)
+func NewRouter(cacheFunc func() *cache.Cache, readyFunc func() bool, progressFunc func() *ingest.Progress) *chi.Mux {
+	h := NewHandler(cacheFunc)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
@@ -27,13 +26,8 @@ func NewRouter(queries *db.Queries, cacheFunc func() *cache.Cache, readyFunc fun
 			}
 			writeJSON(w, resp)
 		})
-		r.Get("/products", h.ListProducts)
-		r.Get("/products/sku-dump", h.SKUDump)
 		r.Get("/products/barcode/{sku}", h.GetProductByBarcode)
-		r.Get("/products/{id}", h.GetProduct)
-		r.Post("/products/{id}/flag", h.CreateFlag)
 		r.Post("/products/sku-lookup", h.SKULookup)
-		r.Get("/search", h.FuzzySearch)
 		r.Get("/bundle", h.BundleDownload)
 		r.Get("/bundle/meta", h.BundleMeta)
 	})

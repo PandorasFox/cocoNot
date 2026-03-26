@@ -1,14 +1,15 @@
 package cache
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -26,21 +27,7 @@ type BundleMeta struct {
 	SizeBytes       int       `json:"size_bytes"`
 	CompressedBytes int       `json:"compressed_bytes"`
 	UpdatedAt       time.Time `json:"updated_at"`
-}
-
-// bundleProduct is the compact JSON representation within the bundle.
-type bundleProduct struct {
-	SKU     string `json:"s"`
-	Name    string `json:"n"`
-	Coconut *int8  `json:"c"` // 1=yes, 0=no, null=unknown
-}
-
-// bundleEnvelope is the top-level JSON structure of the bundle.
-type bundleEnvelope struct {
-	BaseURL   string          `json:"base_url"`
-	UpdatedAt time.Time       `json:"updated_at"`
-	Count     int             `json:"count"`
-	Products  []bundleProduct `json:"products"`
+	BaseURL         string    `json:"base_url"`
 }
 
 // PreparedProduct is the interface expected from the ingest package.
@@ -61,10 +48,60 @@ type Cache struct {
 
 const offBaseURL = "https://world.openfoodfacts.org/product/"
 
+// Bundle format (gzipped TSV):
+//
+//	base_url\thttps://world.openfoodfacts.org/product/
+//	updated_at\t2026-03-25T00:00:00Z
+//	count\t864622
+//	---
+//	0012345678905\tSweet Lychee Peppermint\ty
+//	0099887766554\tAnother Product\tn
+//	0011223344556\tNo Ingredients Yet\t?
+//
+// Status: y=coconut, n=no coconut, ?=unknown
+
+func coconutChar(c *bool) byte {
+	if c == nil {
+		return '?'
+	}
+	if *c {
+		return 'y'
+	}
+	return 'n'
+}
+
+func parseCoconutChar(b byte) *bool {
+	switch b {
+	case 'y':
+		v := true
+		return &v
+	case 'n':
+		v := false
+		return &v
+	default:
+		return nil
+	}
+}
+
+// sanitizeName replaces tabs and newlines with spaces for TSV safety.
+func sanitizeName(s string) string {
+	s = strings.ReplaceAll(s, "\t", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
+}
+
 // Build creates a Cache from a slice of prepared products.
 func Build(products []PreparedProduct) (*Cache, error) {
 	entries := make(map[string]*Entry, len(products))
-	bps := make([]bundleProduct, 0, len(products))
+	now := time.Now().UTC()
+
+	// Build TSV
+	var raw bytes.Buffer
+	fmt.Fprintf(&raw, "base_url\t%s\n", offBaseURL)
+	fmt.Fprintf(&raw, "updated_at\t%s\n", now.Format(time.RFC3339))
+	fmt.Fprintf(&raw, "count\t%d\n", len(products))
+	raw.WriteString("---\n")
 
 	for _, p := range products {
 		entries[p.Code] = &Entry{
@@ -72,54 +109,34 @@ func Build(products []PreparedProduct) (*Cache, error) {
 			Name:            p.Name,
 			ContainsCoconut: p.ContainsCoconut,
 		}
-
-		var c *int8
-		if p.ContainsCoconut != nil {
-			v := int8(0)
-			if *p.ContainsCoconut {
-				v = 1
-			}
-			c = &v
-		}
-		bps = append(bps, bundleProduct{
-			SKU:     p.Code,
-			Name:    p.Name,
-			Coconut: c,
-		})
+		fmt.Fprintf(&raw, "%s\t%s\t%c\n", p.Code, sanitizeName(p.Name), coconutChar(p.ContainsCoconut))
 	}
 
-	env := bundleEnvelope{
-		BaseURL:   offBaseURL,
-		UpdatedAt: time.Now(),
-		Count:     len(bps),
-		Products:  bps,
-	}
-
-	jsonData, err := json.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("marshaling bundle: %w", err)
-	}
+	uncompressedLen := raw.Len()
 
 	var buf bytes.Buffer
 	gz, err := gzip.NewWriterLevel(&buf, gzip.BestCompression)
 	if err != nil {
 		return nil, fmt.Errorf("creating gzip writer: %w", err)
 	}
-	if _, err := gz.Write(jsonData); err != nil {
+	if _, err := gz.Write(raw.Bytes()); err != nil {
 		return nil, fmt.Errorf("writing gzip: %w", err)
 	}
 	if err := gz.Close(); err != nil {
 		return nil, fmt.Errorf("closing gzip: %w", err)
 	}
 
-	log.Printf("Cache built: %d entries, %d bytes JSON, %d bytes gzipped (%.1f%% compression)",
-		len(entries), len(jsonData), buf.Len(), 100-float64(buf.Len())*100/float64(len(jsonData)))
+	log.Printf("Cache built: %d entries, %.1f MB TSV, %.1f MB gzipped (%.0f%% reduction)",
+		len(entries),
+		float64(uncompressedLen)/1024/1024,
+		float64(buf.Len())/1024/1024,
+		100-float64(buf.Len())*100/float64(uncompressedLen))
 
 	return &Cache{
 		entries:         entries,
 		gzippedBlob:     buf.Bytes(),
-		uncompressedLen: len(jsonData),
-		updatedAt:       env.UpdatedAt,
+		uncompressedLen: uncompressedLen,
+		updatedAt:       now,
 	}, nil
 }
 
@@ -136,7 +153,7 @@ func (c *Cache) WriteFile(path string) error {
 	return os.Rename(tmp, path)
 }
 
-// LoadFile reads a gzipped bundle from disk and populates the cache.
+// LoadFile reads a gzipped TSV bundle from disk and populates the cache.
 func LoadFile(path string) (*Cache, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -149,35 +166,69 @@ func LoadFile(path string) (*Cache, error) {
 	}
 	defer gz.Close()
 
-	var env bundleEnvelope
-	if err := json.NewDecoder(gz).Decode(&env); err != nil {
-		return nil, fmt.Errorf("decoding bundle: %w", err)
+	scanner := bufio.NewScanner(gz)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+
+	var updatedAt time.Time
+	var count int
+	inHeader := true
+
+	entries := make(map[string]*Entry)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if inHeader {
+			if line == "---" {
+				inHeader = false
+				if count > 0 {
+					entries = make(map[string]*Entry, count)
+				}
+				continue
+			}
+			parts := strings.SplitN(line, "\t", 2)
+			if len(parts) != 2 {
+				continue
+			}
+			switch parts[0] {
+			case "updated_at":
+				updatedAt, _ = time.Parse(time.RFC3339, parts[1])
+			case "count":
+				count, _ = strconv.Atoi(parts[1])
+			}
+			continue
+		}
+
+		// Data line: sku\tname\tstatus
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) != 3 || len(parts[2]) == 0 {
+			continue
+		}
+
+		entries[parts[0]] = &Entry{
+			SKU:             parts[0],
+			Name:            parts[1],
+			ContainsCoconut: parseCoconutChar(parts[2][0]),
+		}
 	}
 
-	entries := make(map[string]*Entry, len(env.Products))
-	for _, bp := range env.Products {
-		var cc *bool
-		if bp.Coconut != nil {
-			v := *bp.Coconut == 1
-			cc = &v
-		}
-		entries[bp.SKU] = &Entry{
-			SKU:             bp.SKU,
-			Name:            bp.Name,
-			ContainsCoconut: cc,
-		}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scanning bundle: %w", err)
 	}
 
-	// Re-marshal to get accurate uncompressed size
-	jsonData, _ := json.Marshal(env)
+	// Compute uncompressed size from the raw data
+	ungz, _ := gzip.NewReader(bytes.NewReader(data))
+	var rawBuf bytes.Buffer
+	rawBuf.ReadFrom(ungz)
+	ungz.Close()
 
-	log.Printf("Cache loaded from disk: %d entries, %d bytes compressed", len(entries), len(data))
+	log.Printf("Cache loaded from disk: %d entries, %.1f MB compressed", len(entries), float64(len(data))/1024/1024)
 
 	return &Cache{
 		entries:         entries,
 		gzippedBlob:     data,
-		uncompressedLen: len(jsonData),
-		updatedAt:       env.UpdatedAt,
+		uncompressedLen: rawBuf.Len(),
+		updatedAt:       updatedAt,
 	}, nil
 }
 
@@ -209,7 +260,7 @@ func (c *Cache) ServeBundle(w http.ResponseWriter) {
 	updated := c.updatedAt
 	c.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "text/tab-separated-values")
 	w.Header().Set("Content-Encoding", "gzip")
 	w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
 	w.Header().Set("Last-Modified", updated.UTC().Format(http.TimeFormat))
@@ -226,6 +277,7 @@ func (c *Cache) Meta() BundleMeta {
 		SizeBytes:       c.uncompressedLen,
 		CompressedBytes: len(c.gzippedBlob),
 		UpdatedAt:       c.updatedAt,
+		BaseURL:         offBaseURL,
 	}
 }
 

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -11,15 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/golang-migrate/migrate/v4"
-	pgxMigrate "github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/jackc/pgx/v5/stdlib"
-
 	"github.com/hecate/coconutfree/internal/api"
 	"github.com/hecate/coconutfree/internal/cache"
-	"github.com/hecate/coconutfree/internal/db"
 	"github.com/hecate/coconutfree/internal/ingest"
 )
 
@@ -27,31 +19,19 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Connect to database
-	pool, err := db.Connect(ctx)
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-	defer pool.Close()
-
-	// Run migrations
-	if err := runMigrations(pool); err != nil {
-		log.Fatalf("Failed to run migrations: %v", err)
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "/data"
 	}
 
 	// Subcommands
 	if len(os.Args) > 1 {
 		switch os.Args[1] {
 		case "ingest":
-			dataDir := os.Getenv("DATA_DIR")
-			if dataDir == "" {
-				dataDir = "/data"
-			}
 			prepared, err := ingest.RunOFF(ctx, dataDir, nil)
 			if err != nil {
 				log.Fatalf("Ingestion failed: %v", err)
 			}
-			// Build cache
 			cacheProducts := make([]cache.PreparedProduct, len(prepared))
 			for i, p := range prepared {
 				cacheProducts[i] = cache.PreparedProduct{
@@ -68,54 +48,37 @@ func main() {
 			if err := c.WriteFile(cachePath); err != nil {
 				log.Fatalf("Cache write failed: %v", err)
 			}
-			log.Printf("Cache written to %s", cachePath)
-			// Upsert into database
-			if err := ingest.UpsertProducts(ctx, pool, prepared, nil); err != nil {
-				log.Fatalf("Database upsert failed: %v", err)
-			}
+			log.Printf("Cache written to %s (%d entries)", cachePath, c.Count())
 			return
 		default:
 			log.Fatalf("Unknown command: %s (available: ingest)", os.Args[1])
 		}
 	}
 
-	// Start periodic ingestion if DATA_DIR is set (volume mounted)
-	var sched *ingest.Scheduler
-	dataDir := os.Getenv("DATA_DIR")
-	if dataDir != "" {
-		interval := 6 * time.Hour
-		if v := os.Getenv("INGEST_INTERVAL"); v != "" {
-			if d, err := time.ParseDuration(v); err == nil && d > 0 {
-				interval = d
-			} else {
-				log.Printf("Invalid INGEST_INTERVAL %q, using default %s", v, interval)
-			}
-		}
-		sched = ingest.NewScheduler(pool, dataDir, interval)
-
-		// Try to pre-load cache from disk for instant readiness
-		cachePath := filepath.Join(dataDir, "skus.json.gz")
-		if c, err := cache.LoadFile(cachePath); err == nil {
-			sched.SetCache(c)
-			log.Printf("Pre-loaded cache from %s (%d entries)", cachePath, c.Count())
+	// Start periodic ingestion
+	interval := 6 * time.Hour
+	if v := os.Getenv("INGEST_INTERVAL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			interval = d
 		} else {
-			log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
+			log.Printf("Invalid INGEST_INTERVAL %q, using default %s", v, interval)
 		}
+	}
+	sched := ingest.NewScheduler(dataDir, interval)
 
-		go sched.Start(ctx)
-		log.Printf("Ingest scheduler started (interval: %s)", interval)
+	// Pre-load cache from disk for instant readiness
+	cachePath := filepath.Join(dataDir, "skus.json.gz")
+	if c, err := cache.LoadFile(cachePath); err == nil {
+		sched.SetCache(c)
+		log.Printf("Pre-loaded cache from %s (%d entries)", cachePath, c.Count())
+	} else {
+		log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
 	}
 
-	queries := db.NewQueries(pool)
-	readyFunc := func() bool { return true }
-	progressFunc := func() *ingest.Progress { return &ingest.Progress{Phase: "idle"} }
-	cacheFunc := func() *cache.Cache { return nil }
-	if sched != nil {
-		readyFunc = sched.Ready
-		progressFunc = sched.GetProgress
-		cacheFunc = sched.GetCache
-	}
-	router := api.NewRouter(queries, cacheFunc, readyFunc, progressFunc)
+	go sched.Start(ctx)
+	log.Printf("Ingest scheduler started (interval: %s)", interval)
+
+	router := api.NewRouter(sched.GetCache, sched.Ready, sched.GetProgress)
 
 	// Serve frontend static files
 	frontendDir := os.Getenv("FRONTEND_DIR")
@@ -155,32 +118,6 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("Server error: %v", err)
 	}
-}
-
-func runMigrations(pool *pgxpool.Pool) error {
-	sqlDB := stdlib.OpenDBFromPool(pool)
-
-	driver, err := pgxMigrate.WithInstance(sqlDB, &pgxMigrate.Config{})
-	if err != nil {
-		return fmt.Errorf("creating migration driver: %w", err)
-	}
-
-	migrationsDir := os.Getenv("MIGRATIONS_DIR")
-	if migrationsDir == "" {
-		migrationsDir = "file://migrations"
-	}
-
-	m, err := migrate.NewWithDatabaseInstance(migrationsDir, "postgres", driver)
-	if err != nil {
-		return fmt.Errorf("creating migrator: %w", err)
-	}
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		return fmt.Errorf("running migrations: %w", err)
-	}
-
-	log.Println("Migrations complete")
-	return nil
 }
 
 // spaHandler serves the SPA — returns index.html for any path that doesn't match a static file.
