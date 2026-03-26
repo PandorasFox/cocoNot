@@ -255,23 +255,21 @@ func queryParquet(path string, country string) ([]offProduct, error) {
 		}
 	}
 
-	isStructList := func(typ string) bool {
+	hasStruct := func(typ string) bool {
 		upper := strings.ToUpper(typ)
-		return strings.Contains(upper, "STRUCT") && strings.Contains(upper, "LIST")
+		return strings.Contains(upper, "STRUCT")
 	}
 	isList := func(typ string) bool {
 		upper := strings.ToUpper(typ)
 		return strings.Contains(upper, "LIST") || strings.Contains(upper, "[]")
 	}
 
-	// Extract text from a LIST(STRUCT(lang, text)) — prefer 'en', then 'main', then first entry
+	// Extract text from a LIST(STRUCT(lang, text)) — use lang 'main'
 	extractLangText := func(col string) string {
 		return fmt.Sprintf(`COALESCE(
-			(SELECT s.text FROM UNNEST(%s) AS t(s) WHERE s.lang = 'en' LIMIT 1),
 			(SELECT s.text FROM UNNEST(%s) AS t(s) WHERE s.lang = 'main' LIMIT 1),
-			(SELECT s.text FROM UNNEST(%s) AS t(s) LIMIT 1),
 			''
-		)`, col, col, col)
+		)`, col)
 	}
 
 	// Extract ALL text entries from a LIST(STRUCT(lang, text)) — for coconut detection
@@ -285,7 +283,7 @@ func queryParquet(path string, country string) ([]offProduct, error) {
 	// Coerce any column to a scalar string
 	toStr := func(col string) string {
 		typ := colTypes[col]
-		if isStructList(typ) {
+		if hasStruct(typ) {
 			return extractLangText(col)
 		}
 		if isList(typ) {
@@ -316,7 +314,7 @@ func queryParquet(path string, country string) ([]offProduct, error) {
 	var ingredientsCols []string
 	for col, typ := range colTypes {
 		if strings.HasPrefix(col, "ingredients_text") {
-			if isStructList(typ) {
+			if hasStruct(typ) {
 				ingredientsCols = append(ingredientsCols, extractAllText(col))
 			} else if isList(typ) {
 				ingredientsCols = append(ingredientsCols, fmt.Sprintf("COALESCE(array_to_string(%s, ' '), '')", col))
