@@ -39,7 +39,7 @@ export default function SplashScreen() {
     return () => { cancelled = true }
   }, [])
 
-  // Dismiss when server ready (OCR inits lazily on button tap)
+  // Dismiss when server ready
   useEffect(() => {
     if (serverReady) setDismissed(true)
   }, [serverReady])

@@ -1,18 +1,13 @@
-import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest'
-import { createCanvas, loadImage } from 'canvas'
-import fs from 'node:fs'
-import path from 'node:path'
-import Tesseract from 'tesseract.js'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { createCanvas } from 'canvas'
 import {
   drawUnifiedHitboxes,
   videoCoverTransform,
   relativeLuminance,
   HITBOX_COLORS,
-  HITBOX_PADDING,
   STATUS_LABELS,
   type HitboxEntry,
 } from '../hitbox'
-import { flattenWords, tagCoconutWords } from '../../api/ocr'
 
 // ── Helpers ────────────────────────────────────────────────────
 
@@ -130,27 +125,6 @@ describe('drawUnifiedHitboxes', () => {
     expect(fillTextSpy.mock.calls[0][0]).toBe('Bad Product')
   })
 
-  it('draws a border and chip for an OCR coconut hitbox', () => {
-    const map = new Map<string, HitboxEntry>()
-    map.set('ocr:0', makeEntry({ status: 'coconut', name: 'coconut' }))
-
-    const fillTextSpy = vi.spyOn(ctx, 'fillText')
-    drawUnifiedHitboxes(ctx, 400, 800, map)
-
-    expect(fillTextSpy).toHaveBeenCalledTimes(1)
-    expect(fillTextSpy.mock.calls[0][0]).toBe('coconut')
-  })
-
-  it('uses red color for OCR entries', () => {
-    const map = new Map<string, HitboxEntry>()
-    map.set('ocr:0', makeEntry({ status: 'coconut', name: 'coconut' }))
-
-    drawUnifiedHitboxes(ctx, 400, 800, map)
-
-    // strokeStyle should be coconut_ocr color (red)
-    expect(ctx.strokeStyle).toBe(HITBOX_COLORS.coconut_ocr)
-  })
-
   it('uses status-based color for barcode entries', () => {
     const map = new Map<string, HitboxEntry>()
     map.set('sku1', makeEntry({ status: 'clean', name: 'Safe Product' }))
@@ -170,16 +144,6 @@ describe('drawUnifiedHitboxes', () => {
     expect(fillTextSpy.mock.calls[0][0]).toBe(STATUS_LABELS.not_found)
   })
 
-  it('falls back to "COCONUT" when OCR entry has no name', () => {
-    const map = new Map<string, HitboxEntry>()
-    map.set('ocr:0', makeEntry({ status: 'coconut' }))
-
-    const fillTextSpy = vi.spyOn(ctx, 'fillText')
-    drawUnifiedHitboxes(ctx, 400, 800, map)
-
-    expect(fillTextSpy.mock.calls[0][0]).toBe('COCONUT')
-  })
-
   it('truncates long barcode product names at 25 chars', () => {
     const longName = 'A'.repeat(30)
     const map = new Map<string, HitboxEntry>()
@@ -193,113 +157,19 @@ describe('drawUnifiedHitboxes', () => {
     expect(label.endsWith('\u2026')).toBe(true)
   })
 
-  it('truncates long OCR names at 20 chars', () => {
-    const longName = 'B'.repeat(25)
-    const map = new Map<string, HitboxEntry>()
-    map.set('ocr:0', makeEntry({ status: 'coconut', name: longName }))
-
-    const fillTextSpy = vi.spyOn(ctx, 'fillText')
-    drawUnifiedHitboxes(ctx, 400, 800, map)
-
-    const label = fillTextSpy.mock.calls[0][0] as string
-    expect(label.length).toBeLessThanOrEqual(20)
-    expect(label.endsWith('\u2026')).toBe(true)
-  })
-
-  it('draws multiple hitboxes from mixed sources', () => {
+  it('draws multiple hitboxes', () => {
     const map = new Map<string, HitboxEntry>()
     map.set('sku1', makeEntry({ status: 'clean', name: 'Ice Cream A' }))
     map.set('sku2', makeEntry({ status: 'coconut', name: 'Bad Ice Cream' }))
-    map.set('ocr:0', makeEntry({ status: 'coconut', name: 'coconut' }))
 
     const strokeSpy = vi.spyOn(ctx, 'stroke')
     const fillTextSpy = vi.spyOn(ctx, 'fillText')
 
     drawUnifiedHitboxes(ctx, 400, 800, map)
 
-    // 3 rounded rects + 3 chip backgrounds
-    expect(strokeSpy).toHaveBeenCalledTimes(3)
-    // 3 chip labels
-    expect(fillTextSpy).toHaveBeenCalledTimes(3)
+    // 2 rounded rects + 2 chip backgrounds
+    expect(strokeSpy).toHaveBeenCalledTimes(2)
+    // 2 chip labels
+    expect(fillTextSpy).toHaveBeenCalledTimes(2)
   })
-})
-
-// ── Visual hitbox output (OCR → hitboxes → annotated images) ─────
-
-const imagesDir = path.resolve(__dirname, '../../../test-data/ocr-images')
-const outputDir = path.resolve(__dirname, '../../../test-data/ocr-output')
-
-const testImages = fs.existsSync(imagesDir)
-  ? fs.readdirSync(imagesDir).filter(f => /\.jpe?g$/i.test(f)).sort()
-  : []
-
-describe('visual hitbox output', () => {
-  let worker: Tesseract.Worker
-
-  beforeAll(async () => {
-    fs.mkdirSync(outputDir, { recursive: true })
-    worker = await Tesseract.createWorker('eng')
-  }, 60_000)
-
-  afterAll(async () => {
-    if (worker) await worker.terminate()
-  })
-
-  it.skipIf(testImages.length === 0)('test images exist', () => {
-    expect(testImages.length).toBeGreaterThan(0)
-  })
-
-  for (const filename of testImages) {
-    it(`generates hitbox overlay for ${filename}`, async () => {
-      const imgPath = path.join(imagesDir, filename)
-      const img = await loadImage(imgPath)
-      const { width, height } = img
-
-      // Run OCR on the raw image
-      const result = await worker.recognize(imgPath, {}, { blocks: true })
-      const words = flattenWords(result.data.blocks)
-      const hits = tagCoconutWords(words)
-      const coconutHits = hits.filter(h => h.isCoconut)
-
-      // Build hitbox map from coconut matches
-      const hitboxMap = new Map<string, HitboxEntry>()
-      for (let i = 0; i < coconutHits.length; i++) {
-        const hit = coconutHits[i]
-        hitboxMap.set(`ocr:${i}`, {
-          x: hit.x - HITBOX_PADDING,
-          y: hit.y - HITBOX_PADDING,
-          w: hit.w + HITBOX_PADDING * 2,
-          h: hit.h + HITBOX_PADDING * 2,
-          status: 'coconut',
-          name: hit.text,
-          lastSeenAt: Date.now(),
-        })
-      }
-
-      // Draw source image on main canvas
-      const canvas = createCanvas(width, height)
-      const mainCtx = canvas.getContext('2d')
-      mainCtx.drawImage(img as unknown as CanvasImageSource, 0, 0)
-
-      // Draw hitboxes on a transparent overlay, then composite
-      const overlay = createCanvas(width, height)
-      const overlayCtx = overlay.getContext('2d') as unknown as CanvasRenderingContext2D
-      drawUnifiedHitboxes(overlayCtx, width, height, hitboxMap)
-      mainCtx.drawImage(overlay as unknown as CanvasImageSource, 0, 0)
-
-      // Save annotated output
-      const outName = filename.replace(/\.jpe?g$/i, '.png')
-      const outPath = path.join(outputDir, outName)
-      const buffer = canvas.toBuffer('image/png')
-      fs.writeFileSync(outPath, buffer)
-
-      expect(fs.existsSync(outPath)).toBe(true)
-      expect(buffer.length).toBeGreaterThan(0)
-
-      // Log summary for visual inspection
-      console.log(
-        `  ${filename}: ${words.length} words, ${coconutHits.length} coconut hits → ${outName}`,
-      )
-    }, 30_000)
-  }
 })

@@ -1,5 +1,24 @@
 # CoconutFree - Dev Log
 
+## 2026-03-25 — Precomputed SKU bundle + OCR tearout
+
+**Context:** Built a native app that uses platform OCR+barcode scanning for much better performance and accuracy. The webapp now focuses on being a lightweight SKU lookup API + barcode scanner (no OCR).
+
+**Precomputed SKU Bundle:**
+- New `backend/internal/cache` package — builds a gzipped JSON blob of all SKU entries (`{s, n, c}` = sku, name, coconut) with a `base_url` for constructing Open Food Facts links.
+- Ingest pipeline refactored: `RunOFF` now returns `[]PreparedProduct`, caller builds cache **before** PostgreSQL upsert for instant readiness.
+- Scheduler holds `atomic.Pointer[cache.Cache]` for hot-swap after each ingest cycle.
+- Server pre-loads `skus.json.gz` from disk on startup → immediately ready for lookups without waiting for ingestion.
+- New endpoints: `GET /api/bundle` (gzipped blob, ~2-4MB), `GET /api/bundle/meta` (count, sizes, updated_at).
+- `SKULookup`, `GetProductByBarcode`, and `SKUDump` now serve from in-memory cache (O(1) lookups), falling back to PostgreSQL.
+
+**OCR Tearout:**
+- Deleted `ocr.ts`, OCR tests, test data directories.
+- Stripped all OCR code from `BarcodeScanner.tsx` — single barcode mode only, no mode switching, no tap-to-burst, no scan region overlay.
+- Removed `coconut_ocr` hitbox type, simplified `drawUnifiedHitboxes`.
+- Removed `tesseract.js` and `canvas` dependencies.
+- Cleaned up Tesseract CDN cache rule from PWA config and OCR-related gitignore entries.
+
 ## 2026-03-25 — Tap-to-burst OCR with 4K capture + downscale
 
 **Problem:** Continuous OCR polling (every 1333ms) burned CPU/battery and caused thermal throttling on phones. Recognition at full crop resolution (~540×1080) took 4-6s per frame.

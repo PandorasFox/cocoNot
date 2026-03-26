@@ -4,13 +4,3 @@ backend/coconutfree
 *.exe
 .env
 .DS_Store
-
-# Tesseract trained data (downloaded at runtime)
-*.traineddata
-
-# OCR test images (large binary files, keep local)
-frontend/test-data/ocr-images/*.jpg
-frontend/test-data/ocr-images/*.jpeg
-frontend/test-data/ocr-images/*.png
-frontend/test-data/ocr-images/*.webp
-frontend/test-data/ocr-images/*.bmp

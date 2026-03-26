@@ -8,16 +8,18 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 
+	"github.com/hecate/coconutfree/internal/cache"
 	"github.com/hecate/coconutfree/internal/db"
 	"github.com/hecate/coconutfree/internal/models"
 )
 
 type Handler struct {
-	queries *db.Queries
+	queries   *db.Queries
+	cacheFunc func() *cache.Cache
 }
 
-func NewHandler(queries *db.Queries) *Handler {
-	return &Handler{queries: queries}
+func NewHandler(queries *db.Queries, cacheFunc func() *cache.Cache) *Handler {
+	return &Handler{queries: queries, cacheFunc: cacheFunc}
 }
 
 func (h *Handler) ListProducts(w http.ResponseWriter, r *http.Request) {
@@ -83,6 +85,18 @@ func (h *Handler) GetProductByBarcode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try cache first
+	if c := h.cacheFunc(); c != nil {
+		if entry := c.Lookup(sku); entry != nil {
+			writeJSON(w, models.SKULookupResult{
+				Name:            entry.Name,
+				ContainsCoconut: entry.ContainsCoconut,
+			})
+			return
+		}
+	}
+
+	// Fall back to database
 	product, err := h.queries.GetProductByBarcode(r.Context(), sku)
 	if err != nil {
 		http.Error(w, "product not found", http.StatusNotFound)
@@ -93,6 +107,13 @@ func (h *Handler) GetProductByBarcode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) SKUDump(w http.ResponseWriter, r *http.Request) {
+	// Serve from cache if available
+	if c := h.cacheFunc(); c != nil {
+		c.ServeBundle(w)
+		return
+	}
+
+	// Fall back to database
 	entries, err := h.queries.DumpSKUs(r.Context())
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -151,6 +172,21 @@ func (h *Handler) SKULookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Try cache first
+	if c := h.cacheFunc(); c != nil {
+		entries := c.LookupBatch(req.SKUs)
+		results := make(map[string]models.SKULookupResult, len(entries))
+		for sku, e := range entries {
+			results[sku] = models.SKULookupResult{
+				Name:            e.Name,
+				ContainsCoconut: e.ContainsCoconut,
+			}
+		}
+		writeJSON(w, map[string]any{"results": results})
+		return
+	}
+
+	// Fall back to database
 	results, err := h.queries.LookupSKUs(r.Context(), req.SKUs)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -181,6 +217,24 @@ func (h *Handler) FuzzySearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]any{"products": products})
+}
+
+func (h *Handler) BundleDownload(w http.ResponseWriter, r *http.Request) {
+	c := h.cacheFunc()
+	if c == nil {
+		http.Error(w, "cache not ready", http.StatusServiceUnavailable)
+		return
+	}
+	c.ServeBundle(w)
+}
+
+func (h *Handler) BundleMeta(w http.ResponseWriter, r *http.Request) {
+	c := h.cacheFunc()
+	if c == nil {
+		http.Error(w, "cache not ready", http.StatusServiceUnavailable)
+		return
+	}
+	writeJSON(w, c.Meta())
 }
 
 func writeJSON(w http.ResponseWriter, v any) {

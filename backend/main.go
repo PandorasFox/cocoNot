@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/hecate/coconutfree/internal/api"
+	"github.com/hecate/coconutfree/internal/cache"
 	"github.com/hecate/coconutfree/internal/db"
 	"github.com/hecate/coconutfree/internal/ingest"
 )
@@ -46,8 +47,31 @@ func main() {
 			if dataDir == "" {
 				dataDir = "/data"
 			}
-			if err := ingest.RunOFF(ctx, pool, dataDir, nil); err != nil {
+			prepared, err := ingest.RunOFF(ctx, dataDir, nil)
+			if err != nil {
 				log.Fatalf("Ingestion failed: %v", err)
+			}
+			// Build cache
+			cacheProducts := make([]cache.PreparedProduct, len(prepared))
+			for i, p := range prepared {
+				cacheProducts[i] = cache.PreparedProduct{
+					Code:            p.Code,
+					Name:            p.Name,
+					ContainsCoconut: p.ContainsCoconut,
+				}
+			}
+			c, err := cache.Build(cacheProducts)
+			if err != nil {
+				log.Fatalf("Cache build failed: %v", err)
+			}
+			cachePath := filepath.Join(dataDir, "skus.json.gz")
+			if err := c.WriteFile(cachePath); err != nil {
+				log.Fatalf("Cache write failed: %v", err)
+			}
+			log.Printf("Cache written to %s", cachePath)
+			// Upsert into database
+			if err := ingest.UpsertProducts(ctx, pool, prepared, nil); err != nil {
+				log.Fatalf("Database upsert failed: %v", err)
 			}
 			return
 		default:
@@ -68,6 +92,16 @@ func main() {
 			}
 		}
 		sched = ingest.NewScheduler(pool, dataDir, interval)
+
+		// Try to pre-load cache from disk for instant readiness
+		cachePath := filepath.Join(dataDir, "skus.json.gz")
+		if c, err := cache.LoadFile(cachePath); err == nil {
+			sched.SetCache(c)
+			log.Printf("Pre-loaded cache from %s (%d entries)", cachePath, c.Count())
+		} else {
+			log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
+		}
+
 		go sched.Start(ctx)
 		log.Printf("Ingest scheduler started (interval: %s)", interval)
 	}
@@ -75,11 +109,13 @@ func main() {
 	queries := db.NewQueries(pool)
 	readyFunc := func() bool { return true }
 	progressFunc := func() *ingest.Progress { return &ingest.Progress{Phase: "idle"} }
+	cacheFunc := func() *cache.Cache { return nil }
 	if sched != nil {
 		readyFunc = sched.Ready
 		progressFunc = sched.GetProgress
+		cacheFunc = sched.GetCache
 	}
-	router := api.NewRouter(queries, readyFunc, progressFunc)
+	router := api.NewRouter(queries, cacheFunc, readyFunc, progressFunc)
 
 	// Serve frontend static files
 	frontendDir := os.Getenv("FRONTEND_DIR")

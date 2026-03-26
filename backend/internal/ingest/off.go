@@ -42,9 +42,45 @@ type offProduct struct {
 	CategoriesTags  string // comma-separated
 }
 
-// RunOFF downloads the Open Food Facts parquet file (if needed) and ingests
-// products into the database. Country filter is configurable via INGEST_COUNTRIES.
-func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string, onProgress ProgressFunc) error {
+// NeedsIngest reports whether the parquet file is missing or stale AND the
+// cache file is also missing or older than the parquet. Returns false when
+// there's nothing new to process.
+func NeedsIngest(dataDir string) bool {
+	if dataDir == "" {
+		dataDir = defaultDir
+	}
+	parquetPath := filepath.Join(dataDir, "food.parquet")
+	cachePath := filepath.Join(dataDir, "skus.json.gz")
+
+	// No parquet at all → need to download + ingest
+	pInfo, err := os.Stat(parquetPath)
+	if err != nil {
+		return true
+	}
+
+	// Cache missing → need to process the parquet we have
+	cInfo, err := os.Stat(cachePath)
+	if err != nil {
+		return true
+	}
+
+	// Cache is older than parquet → stale, re-process
+	if cInfo.ModTime().Before(pInfo.ModTime()) {
+		return true
+	}
+
+	// Parquet is stale (>24h) → need fresh download
+	if time.Since(pInfo.ModTime()) > 24*time.Hour {
+		return true
+	}
+
+	return false
+}
+
+// RunOFF downloads the Open Food Facts parquet file (if needed), queries it,
+// and returns prepared products. Country filter is configurable via INGEST_COUNTRIES.
+// The caller is responsible for building the cache and upserting into the database.
+func RunOFF(ctx context.Context, dataDir string, onProgress ProgressFunc) ([]PreparedProduct, error) {
 	if onProgress == nil {
 		onProgress = func(string, int64, int64) {}
 	}
@@ -59,11 +95,9 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string, onProgress 
 		log.Println("Downloading Open Food Facts parquet file...")
 		onProgress("downloading", 0, 0)
 		if err := downloadParquet(ctx, parquetPath, onProgress); err != nil {
-			return fmt.Errorf("downloading parquet: %w", err)
+			return nil, fmt.Errorf("downloading parquet: %w", err)
 		}
 		log.Println("Download complete")
-	} else {
-		log.Println("Using existing parquet file (less than 24h old)")
 	}
 
 	// Query with DuckDB
@@ -82,14 +116,27 @@ func RunOFF(ctx context.Context, pool *pgxpool.Pool, dataDir string, onProgress 
 	onProgress("querying", 0, 0)
 	products, err := queryParquet(parquetPath, country)
 	if err != nil {
-		return fmt.Errorf("querying parquet: %w", err)
+		return nil, fmt.Errorf("querying parquet: %w", err)
 	}
 	log.Printf("Found %d products", len(products))
 	onProgress("querying", int64(len(products)), int64(len(products)))
 
-	// Upsert into Postgres
+	// Pre-compute all product data
+	log.Println("Pre-computing product data...")
+	prepared := PrepareProducts(products)
+	log.Printf("Prepared %d valid products (deduped from %d)", len(prepared), len(products))
+
+	return prepared, nil
+}
+
+// UpsertProducts writes prepared products into the database.
+func UpsertProducts(ctx context.Context, pool *pgxpool.Pool, prepared []PreparedProduct, onProgress ProgressFunc) error {
+	if onProgress == nil {
+		onProgress = func(string, int64, int64) {}
+	}
+
 	log.Println("Upserting into database...")
-	stats, err := upsertProducts(ctx, pool, products, onProgress)
+	stats, err := upsertProducts(ctx, pool, prepared, onProgress)
 	if err != nil {
 		return fmt.Errorf("upserting products: %w", err)
 	}
@@ -341,23 +388,23 @@ const (
 	upsertWorkers   = 8
 )
 
-// preparedProduct holds pre-computed fields ready for DB upsert.
-type preparedProduct struct {
-	code            string
-	brand           string
-	name            string
-	category        string
-	ingredientsText string
-	imageURL        *string
-	coconutFound    bool
-	hasIngredients  bool
-	containsCoconut *bool
+// PreparedProduct holds pre-computed fields ready for DB upsert and cache building.
+type PreparedProduct struct {
+	Code            string
+	Brand           string
+	Name            string
+	Category        string
+	IngredientsText string
+	ImageURL        *string
+	CoconutFound    bool
+	HasIngredients  bool
+	ContainsCoconut *bool
 }
 
-// prepareProducts pre-computes coconut detection, classification, and field
+// PrepareProducts pre-computes coconut detection, classification, and field
 // normalization for all products. Filters out invalid entries and deduplicates
 // by SKU (keeps last occurrence).
-func prepareProducts(products []offProduct) []preparedProduct {
+func PrepareProducts(products []offProduct) []PreparedProduct {
 	// Deduplicate by SKU — keep last occurrence (matches old sequential behavior)
 	seen := make(map[string]int, len(products))
 	for i, p := range products {
@@ -367,7 +414,7 @@ func prepareProducts(products []offProduct) []preparedProduct {
 		seen[p.Code] = i
 	}
 
-	result := make([]preparedProduct, 0, len(seen))
+	result := make([]PreparedProduct, 0, len(seen))
 	for _, idx := range seen {
 		p := products[idx]
 
@@ -393,27 +440,23 @@ func prepareProducts(products []offProduct) []preparedProduct {
 			imageURL = &p.ImageURL
 		}
 
-		result = append(result, preparedProduct{
-			code:            p.Code,
-			brand:           brand,
-			name:            name,
-			category:        classifyCategory(p.CategoriesTags),
-			ingredientsText: p.IngredientsText,
-			imageURL:        imageURL,
-			coconutFound:    coconutFound,
-			hasIngredients:  hasIngredients,
-			containsCoconut: containsCoconut,
+		result = append(result, PreparedProduct{
+			Code:            p.Code,
+			Brand:           brand,
+			Name:            name,
+			Category:        classifyCategory(p.CategoriesTags),
+			IngredientsText: p.IngredientsText,
+			ImageURL:        imageURL,
+			CoconutFound:    coconutFound,
+			HasIngredients:  hasIngredients,
+			ContainsCoconut: containsCoconut,
 		})
 	}
 	return result
 }
 
-func upsertProducts(ctx context.Context, pool *pgxpool.Pool, products []offProduct, onProgress ProgressFunc) (upsertStats, error) {
-	// Phase 1: Pre-compute all product data (CPU-bound, fast)
-	log.Println("Pre-computing product data...")
-	prepared := prepareProducts(products)
+func upsertProducts(ctx context.Context, pool *pgxpool.Pool, prepared []PreparedProduct, onProgress ProgressFunc) (upsertStats, error) {
 	total := int64(len(prepared))
-	log.Printf("Prepared %d valid products (deduped from %d)", total, len(products))
 
 	// Phase 2: Chunk and fan out to worker pool
 	var (
@@ -467,7 +510,7 @@ type existingProduct struct {
 
 // processChunk handles a batch of products: bulk-reads existing state, then
 // pipelines all writes through a single pgx.Batch inside a transaction.
-func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProduct, now time.Time) (upsertStats, error) {
+func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []PreparedProduct, now time.Time) (upsertStats, error) {
 	var stats upsertStats
 
 	tx, err := pool.Begin(ctx)
@@ -479,7 +522,7 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 	// Bulk lookup existing products by SKU
 	skus := make([]string, len(chunk))
 	for i, p := range chunk {
-		skus[i] = p.code
+		skus[i] = p.Code
 	}
 
 	existing := make(map[string]existingProduct, len(chunk))
@@ -531,19 +574,19 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 	batch := &pgx.Batch{}
 
 	for _, p := range chunk {
-		if ep, ok := existing[p.code]; ok {
+		if ep, ok := existing[p.Code]; ok {
 			// Existing product — respect user flags
 			if flagged[ep.id] {
 				stats.unchanged++
 				continue
 			}
 
-			statusChanged := !boolPtrEqual(ep.containsCoconut, p.containsCoconut)
+			statusChanged := !boolPtrEqual(ep.containsCoconut, p.ContainsCoconut)
 			if statusChanged {
 				batch.Queue(`
 					INSERT INTO status_changelog (id, product_id, old_contains_coconut, new_contains_coconut, reason, changed_at)
 					VALUES ($1, $2, $3, $4, $5, $6)
-				`, uuid.New(), ep.id, ep.containsCoconut, p.containsCoconut, "Open Food Facts data update", now)
+				`, uuid.New(), ep.id, ep.containsCoconut, p.ContainsCoconut, "Open Food Facts data update", now)
 				stats.updated++
 			} else {
 				stats.refreshed++
@@ -553,9 +596,9 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 				UPDATE products SET brand = $1, name = $2, category = $3, image_url = $4,
 					contains_coconut = $5, status_as_of = $6, updated_at = $6
 				WHERE id = $7
-			`, p.brand, p.name, p.category, p.imageURL, p.containsCoconut, now, ep.id)
+			`, p.Brand, p.Name, p.Category, p.ImageURL, p.ContainsCoconut, now, ep.id)
 
-			if p.hasIngredients {
+			if p.HasIngredients {
 				batch.Queue(`
 					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
 					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
@@ -563,7 +606,7 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 						ingredients_raw = EXCLUDED.ingredients_raw,
 						coconut_found = EXCLUDED.coconut_found,
 						fetched_at = EXCLUDED.fetched_at
-				`, uuid.New(), ep.id, p.code, p.ingredientsText, p.coconutFound, now)
+				`, uuid.New(), ep.id, p.Code, p.IngredientsText, p.CoconutFound, now)
 			}
 		} else {
 			// New product — insert
@@ -571,9 +614,9 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 			batch.Queue(`
 				INSERT INTO products (id, sku, brand, name, category, image_url, contains_coconut, status_as_of, created_at, updated_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-			`, id, p.code, p.brand, p.name, p.category, p.imageURL, p.containsCoconut, now, now)
+			`, id, p.Code, p.Brand, p.Name, p.Category, p.ImageURL, p.ContainsCoconut, now, now)
 
-			if p.hasIngredients {
+			if p.HasIngredients {
 				batch.Queue(`
 					INSERT INTO ingredient_sources (id, product_id, source_type, source_url, ingredients_raw, coconut_found, fetched_at, created_at)
 					VALUES ($1, $2, 'openfoodfacts', 'https://world.openfoodfacts.org/product/' || $3, $4, $5, $6, $6)
@@ -581,7 +624,7 @@ func processChunk(ctx context.Context, pool *pgxpool.Pool, chunk []preparedProdu
 						ingredients_raw = EXCLUDED.ingredients_raw,
 						coconut_found = EXCLUDED.coconut_found,
 						fetched_at = EXCLUDED.fetched_at
-				`, uuid.New(), id, p.code, p.ingredientsText, p.coconutFound, now)
+				`, uuid.New(), id, p.Code, p.IngredientsText, p.CoconutFound, now)
 			}
 
 			stats.inserted++

@@ -1,11 +1,10 @@
 import type { CachedSKU } from '../api/cache'
 
 // Colors for hitbox borders
-export const HITBOX_COLORS: Record<CachedSKU['status'] | 'coconut_ocr', string> = {
+export const HITBOX_COLORS: Record<CachedSKU['status'], string> = {
   coconut: '#ef4444',   // red
   clean: '#eab308',     // yellow
   not_found: '#3b82f6', // blue
-  coconut_ocr: '#ef4444', // red (same as coconut)
 }
 
 // Status fallback labels when no product name is cached
@@ -66,7 +65,7 @@ export function videoCoverTransform(
   return { scale, offsetX, offsetY }
 }
 
-/** Draw unified hitboxes (barcode + OCR coconut matches) onto the canvas. */
+/** Draw hitboxes for barcode detections onto the canvas. */
 export function drawUnifiedHitboxes(
   ctx: CanvasRenderingContext2D,
   dw: number,
@@ -80,18 +79,11 @@ export function drawUnifiedHitboxes(
   const chipPadY = 2
   const chipRadius = 3
 
-  for (const [key, entry] of hitboxMap) {
+  for (const [, entry] of hitboxMap) {
     const { x, y, w, h, status, name } = entry
-    const isOcr = key.startsWith('ocr:')
-    const color = isOcr ? HITBOX_COLORS.coconut_ocr : (HITBOX_COLORS[status] ?? '#ef4444')
+    const color = HITBOX_COLORS[status] ?? '#ef4444'
 
-    // OCR hitboxes: thicker border, grown outward so it doesn't cover text
-    const lineWidth = isOcr ? 5 : 3
-    const outset = isOcr ? lineWidth / 2 : 0
-    const rx = x - outset
-    const ry = y - outset
-    const rw = w + outset * 2
-    const rh = h + outset * 2
+    const lineWidth = 3
 
     // Draw rounded rect border
     ctx.strokeStyle = color
@@ -100,24 +92,22 @@ export function drawUnifiedHitboxes(
 
     const r = 6
     ctx.beginPath()
-    ctx.moveTo(rx + r, ry)
-    ctx.lineTo(rx + rw - r, ry)
-    ctx.quadraticCurveTo(rx + rw, ry, rx + rw, ry + r)
-    ctx.lineTo(rx + rw, ry + rh - r)
-    ctx.quadraticCurveTo(rx + rw, ry + rh, rx + rw - r, ry + rh)
-    ctx.lineTo(rx + r, ry + rh)
-    ctx.quadraticCurveTo(rx, ry + rh, rx, ry + rh - r)
-    ctx.lineTo(rx, ry + r)
-    ctx.quadraticCurveTo(rx, ry, rx + r, ry)
+    ctx.moveTo(x + r, y)
+    ctx.lineTo(x + w - r, y)
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r)
+    ctx.lineTo(x + w, y + h - r)
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
+    ctx.lineTo(x + r, y + h)
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r)
+    ctx.lineTo(x, y + r)
+    ctx.quadraticCurveTo(x, y, x + r, y)
     ctx.closePath()
     ctx.stroke()
 
     // Label chip above the bounding box
-    const label = isOcr
-      ? (name && name.length > 20 ? name.slice(0, 19) + '\u2026' : name ?? 'COCONUT')
-      : (name
-          ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
-          : STATUS_LABELS[status] ?? status.toUpperCase())
+    const label = name
+      ? (name.length > 25 ? name.slice(0, 24) + '\u2026' : name)
+      : STATUS_LABELS[status] ?? status.toUpperCase()
 
     ctx.font = `bold ${chipFontSize}px sans-serif`
     const textWidth = ctx.measureText(label).width
