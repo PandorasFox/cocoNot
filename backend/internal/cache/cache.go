@@ -260,8 +260,7 @@ func (c *Cache) ServeBundle(w http.ResponseWriter) {
 	updated := c.updatedAt
 	c.mu.RUnlock()
 
-	w.Header().Set("Content-Type", "text/tab-separated-values")
-	w.Header().Set("Content-Encoding", "gzip")
+	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Length", strconv.Itoa(len(blob)))
 	w.Header().Set("Last-Modified", updated.UTC().Format(http.TimeFormat))
 	w.Write(blob)
