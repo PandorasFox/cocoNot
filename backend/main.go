@@ -68,11 +68,17 @@ func main() {
 
 	// Pre-load cache from disk for instant readiness
 	cachePath := filepath.Join(dataDir, "skus.json.gz")
-	if c, err := cache.LoadFile(cachePath); err == nil {
+	if c, err := cache.LoadFile(cachePath); err == nil && c.Count() > 0 {
 		sched.SetCache(c)
 		log.Printf("Pre-loaded cache from %s (%d entries)", cachePath, c.Count())
 	} else {
-		log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
+		if err != nil {
+			log.Printf("Cache at %s unreadable (will rebuild): %v", cachePath, err)
+			// Remove stale/corrupt cache so NeedsIngest sees it as missing
+			os.Remove(cachePath)
+		} else {
+			log.Printf("No pre-built cache found at %s, will build on first ingest", cachePath)
+		}
 	}
 
 	go sched.Start(ctx)
